@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2026-03-18
 
+### Attribution
+
+This release is based on the original [LACP](https://github.com/0xNyk/lacp) architecture by [0xNyk](https://github.com/0xNyk).
+
+**Credits:**
+- **Original LACP concept & design:** 0xNyk
+- **OpenClaw plugin adaptation:** Easy Labs + OpenClaw Community
+- **Implementation & testing:** 11-agent fleet (2.5 hours)
+
 ### Added
 
 **Phase 1: Execution Hooks**
@@ -115,7 +124,7 @@ This project follows [Semantic Versioning](https://semver.org/):
 cp -r ~/.openclaw/plugins/openclaw-lacp-fusion ~/.openclaw/plugins/openclaw-lacp-fusion.1.0.0
 
 # Download and install new version
-wget https://github.com/openclaw/plugins/releases/download/v1.0.1/openclaw-lacp-fusion-1.0.1.zip
+wget https://github.com/itseasyco/openclaw-lacp-fusion/releases/download/v1.0.1/openclaw-lacp-fusion-1.0.1.zip
 unzip openclaw-lacp-fusion-1.0.1.zip
 cd openclaw-lacp-fusion
 bash INSTALL.sh
@@ -142,7 +151,7 @@ Breaking changes will be documented in the release notes. A migration guide will
 
 ## Support
 
-- **GitHub Issues:** https://github.com/openclaw/plugins/issues
+- **GitHub Issues:** https://github.com/itseasyco/openclaw-lacp-fusion/issues
 - **Discord:** https://discord.com/invite/clawd
 - **Email:** plugins@openclaw.ai
 

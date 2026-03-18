@@ -2,6 +2,8 @@
 
 A complete, production-ready plugin system for OpenClaw that brings **LACP (Local Agent Control Plane)** capabilities — execution hooks, policy gates, session memory, and evidence verification.
 
+> **Based on:** [LACP by 0xNyk](https://github.com/0xNyk/lacp) — adapted and extended for OpenClaw integration
+
 ## Features
 
 ### 🔐 Execution Hooks (Phase 1)
@@ -33,7 +35,7 @@ A complete, production-ready plugin system for OpenClaw that brings **LACP (Loca
 
 ```bash
 # Download latest release
-wget https://github.com/openclaw/plugins/releases/download/v1.0.0/openclaw-lacp-fusion-1.0.0.zip
+wget https://github.com/itseasyco/openclaw-lacp-fusion/releases/download/v1.0.0/openclaw-lacp-fusion-1.0.0.zip
 
 # Extract and install
 unzip openclaw-lacp-fusion-1.0.0.zip
@@ -69,7 +71,6 @@ Options: `minimal-stop` (dev), `balanced` (recommended), `hardened-exec` (produc
 
 | Document | Purpose |
 |----------|---------|
-| [README.md](./releases/) | Quick start guide |
 | [COMPLETE-GUIDE.md](./docs/COMPLETE-GUIDE.md) | Full user guide (800+ lines) |
 | [DEPLOYMENT-TO-OPENCLAW.md](./docs/DEPLOYMENT-TO-OPENCLAW.md) | Integration steps |
 | [MEMORY-SCAFFOLDING.md](./docs/MEMORY-SCAFFOLDING.md) | Memory system architecture |
@@ -225,7 +226,7 @@ MIT License — See [LICENSE](./LICENSE) file
 
 ## Support
 
-- **Issues:** https://github.com/openclaw/plugins/issues
+- **Issues:** https://github.com/itseasyco/openclaw-lacp-fusion/issues
 - **Discord:** https://discord.com/invite/clawd
 - **Email:** plugins@openclaw.ai
 
@@ -246,8 +247,19 @@ Built by OpenClaw Community through 11 parallel agents (Phases 1-4) in ~2.5 hour
 
 ---
 
-**Ready to install?** Download the [latest release](https://github.com/openclaw/plugins/releases) and run `bash INSTALL.sh`
+**Ready to install?** Download the [latest release](https://github.com/itseasyco/openclaw-lacp-fusion/releases) and run `bash INSTALL.sh`
 
 **Want to contribute?** Fork this repo and submit a PR!
 
 **Questions?** See [COMPLETE-GUIDE.md](./docs/COMPLETE-GUIDE.md) or file an issue
+
+---
+
+## Attribution
+
+This plugin is based on the original [LACP](https://github.com/0xNyk/lacp) project by [0xNyk](https://github.com/0xNyk). 
+
+**Key contributions:**
+- Original LACP architecture and concepts from 0xNyk
+- OpenClaw plugin adaptation, hooks system, and extensions by the Easy Labs + OpenClaw Community team
+- All phases (1-4) built and tested for OpenClaw v0.23.0+
