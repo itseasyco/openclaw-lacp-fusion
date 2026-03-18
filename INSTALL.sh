@@ -7,7 +7,7 @@ set -euo pipefail
 # Registers in ~/.openclaw/openclaw.json gateway config
 
 PLUGIN_NAME="openclaw-lacp-fusion"
-PLUGIN_VERSION="2.0.0"
+PLUGIN_VERSION="2.1.0"
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 PLUGIN_PATH="$OPENCLAW_HOME/extensions/$PLUGIN_NAME"
 GATEWAY_CONFIG="$OPENCLAW_HOME/openclaw.json"
@@ -442,6 +442,14 @@ ${BOLD}Profiles:${NC}
   Change profile:
     jq '.plugins.entries["openclaw-lacp-fusion"].config.profile = "hardened-exec"' \\
       $GATEWAY_CONFIG > /tmp/oc.json && mv /tmp/oc.json $GATEWAY_CONFIG
+
+${BOLD}Lossless-Claw Integration (optional):${NC}
+  To use the native LCM context engine instead of file-based:
+  1. Ensure ~/.openclaw/lcm.db exists (created by lossless-claw)
+  2. Add to your openclaw.json plugin config:
+     "contextEngine": "lossless-claw"
+  3. Test: openclaw-lacp-context inject --project my-project --backend lcm
+  4. See docs/LOSSLESS-CLAW-INTEGRATION.md for full guide
 
 EOF
 }

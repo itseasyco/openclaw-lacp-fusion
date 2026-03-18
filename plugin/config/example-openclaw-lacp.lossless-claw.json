@@ -1,0 +1,11 @@
+{
+  "openclaw-lacp": {
+    "enabled": true,
+    "config": {
+      "contextEngine": "lossless-claw",
+      "lcmQueryBatchSize": 50,
+      "promotionThreshold": 70,
+      "autoDiscoveryInterval": "6h"
+    }
+  }
+}

@@ -10,7 +10,7 @@
 
 set -eo pipefail
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 SCRIPT_NAME="openclaw-lacp-context"
 
 # Colors
@@ -54,6 +54,8 @@ OPTIONS:
   --max-facts <n>      Max facts to inject (default: 3)
   --min-score <n>      Minimum relevance score (default: 50)
   --format <fmt>       Output format: text, json, markdown (default: text)
+  --backend <type>       Override backend: 'lcm' or 'file' (default: from config)
+  --discover             Auto-discover summaries (requires lossless-claw backend)
   --session-id <id>    Session ID for tracking
   --help               Show this help
 
@@ -233,7 +235,7 @@ format_output() {
 # --- Commands ---
 
 cmd_inject() {
-    local project="" agent="" topic=""
+    local project="" agent="" topic="" backend_override="" discover=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -241,6 +243,8 @@ cmd_inject() {
             --agent)    agent="$2"; shift 2 ;;
             --depth)    DEPTH="$2"; shift 2 ;;
             --topic)    topic="$2"; shift 2 ;;
+            --backend)  backend_override="$2"; shift 2 ;;
+            --discover) discover=true; shift ;;
             --format)   OUTPUT_FORMAT="$2"; shift 2 ;;
             *)          log_error "Unknown option: $1"; exit 1 ;;
         esac
@@ -502,7 +506,7 @@ write_injection_metadata() {
 
 # Auto-inject top-N facts for session-start hook integration
 cmd_auto_inject() {
-    local project="" agent="" topic="" session_id=""
+    local project="" agent="" topic="" session_id="" backend_override="" discover=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -511,6 +515,8 @@ cmd_auto_inject() {
             --topic)      topic="$2"; shift 2 ;;
             --max-facts)  MAX_FACTS="$2"; shift 2 ;;
             --session-id) session_id="$2"; shift 2 ;;
+            --backend)    backend_override="$2"; shift 2 ;;
+            --discover)   discover=true; shift ;;
             --format)     OUTPUT_FORMAT="$2"; shift 2 ;;
             *)            log_error "Unknown option: $1"; exit 1 ;;
         esac

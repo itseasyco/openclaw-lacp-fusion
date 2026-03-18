@@ -1,6 +1,6 @@
 {
   "id": "openclaw-lacp-fusion",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Local Agent Control Plane — hooks, policy gates, memory scaffolding, knowledge graph, code intelligence, and provenance tracking",
   "author": "Easy Labs",
   "license": "MIT",
@@ -95,6 +95,25 @@
         "type": "integer",
         "minimum": 0,
         "default": 30
+      },
+      "contextEngine": {
+        "type": ["string", "null"],
+        "enum": ["lossless-claw", null],
+        "default": null,
+        "description": "Use 'lossless-claw' for native LCM integration, null for file-based"
+      },
+      "lcmQueryBatchSize": {
+        "type": "number",
+        "default": 50,
+        "minimum": 1,
+        "maximum": 1000,
+        "description": "Batch size for LCM queries"
+      },
+      "autoDiscoveryInterval": {
+        "type": "string",
+        "enum": ["1h", "2h", "4h", "6h", "8h", "12h", "24h"],
+        "default": "6h",
+        "description": "How often to auto-discover summaries (requires LCM backend)"
       }
     }
   },
@@ -145,7 +164,8 @@
     "code-intelligence",
     "provenance-tracking",
     "task-verification",
-    "context-injection"
+    "context-injection",
+    "backend-abstraction"
   ],
   "requirements": {
     "openclaw": ">=0.23.0",
@@ -157,7 +177,8 @@
       "obsidian": "Knowledge graph (Layer 2)",
       "qmd": "Semantic search indexing",
       "smart-connections": "MCP semantic search",
-      "gitnexus": "Advanced code intelligence (Layer 4)"
+      "gitnexus": "Advanced code intelligence (Layer 4)",
+      "lossless-claw": "Native LCM context engine"
     }
   },
   "bin": {

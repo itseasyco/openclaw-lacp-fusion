@@ -7,11 +7,11 @@
 #   openclaw-lacp-promote list --project <project> [--since <date>]
 #   openclaw-lacp-promote verify --receipt-hash <hash>
 #
-# Part of OpenClaw LACP v2.0.0 — LCM Bidirectional Integration
+# Part of OpenClaw LACP v2.2.0 — Config-driven backend selection
 
 set -eo pipefail
 
-VERSION="2.0.0"
+VERSION="2.2.0"
 SCRIPT_NAME="openclaw-lacp-promote"
 
 # Colors
@@ -56,6 +56,10 @@ OPTIONS:
   --project <name>       Project filter
   --since <date>         Date filter (YYYY-MM-DD)
   --receipt-hash <hash>  Receipt hash to verify
+  --backend <type>       Override backend: 'lcm' or 'file' (default: from config)
+  --discover             Auto-discover summaries (requires lossless-claw backend)
+  --backend <name>       Override backend: lossless-claw or file (default: from config)
+  --discover             Auto-discover summaries from LCM backend (requires lossless-claw)
   --dry-run              Score but don't actually promote
   --help                 Show this help
 
@@ -443,7 +447,7 @@ log_to_gated_runs() {
 
 # Full pipeline: read file → score → promote if above threshold
 cmd_pipeline() {
-    local file="" project="" threshold=70 dry_run=false category=""
+    local file="" project="" threshold=70 dry_run=false category="" backend_override="" discover=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -451,6 +455,8 @@ cmd_pipeline() {
             --project)    project="$2"; shift 2 ;;
             --threshold)  threshold="$2"; shift 2 ;;
             --category)   category="$2"; shift 2 ;;
+            --backend)    backend_override="$2"; shift 2 ;;
+            --discover)   discover=true; shift ;;
             --dry-run)    dry_run=true; shift ;;
             *)            log_error "Unknown option: $1"; exit 1 ;;
         esac
@@ -494,6 +500,27 @@ cmd_pipeline() {
             content=$(echo "$content" | jq -r '.content // ""' 2>/dev/null || echo "$content")
         fi
     fi
+
+    # Detect backend
+    local backend_type="${backend_override:-auto}"
+    if [[ "$backend_type" == "auto" ]]; then
+        # Check config for contextEngine
+        if command -v python3 &>/dev/null && [[ -f "${V2_LCM_DIR}/config_loader.py" ]]; then
+            backend_type=$(python3 -c "
+import sys
+sys.path.insert(0, '${V2_LCM_DIR}')
+from config_loader import load_openclaw_lacp_config, get_context_engine_name
+try:
+    config = load_openclaw_lacp_config()
+    print(get_context_engine_name(config))
+except Exception:
+    print('file-based')
+" 2>/dev/null || echo "file-based")
+        else
+            backend_type="file-based"
+        fi
+    fi
+    log_info "Backend: ${backend_type}"
 
     # Run promotion scorer via Python
     log_info "Running promotion scorer..."
@@ -702,6 +729,7 @@ main() {
         manual)   cmd_manual "$@" ;;
         list)     cmd_list "$@" ;;
         verify)   cmd_verify "$@" ;;
+        discover) cmd_discover "$@" ;;
         --help|-h) usage ;;
         --version|-v) echo "${SCRIPT_NAME} v${VERSION}" ;;
         *)

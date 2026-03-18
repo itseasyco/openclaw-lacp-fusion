@@ -210,7 +210,7 @@ class LCMLACPLinker:
 
         lines.append("")
         lines.append("---")
-        lines.append(f"*Auto-linked by openclaw-lacp-promote v2.0.0*")
+        lines.append(f"*Auto-linked by openclaw-lacp-promote v2.1.0*")
 
         return "\n".join(lines)
 
@@ -241,6 +241,41 @@ class LCMLACPLinker:
     def get_links(self) -> list:
         """Return all links created in this session."""
         return list(self._links)
+
+
+    def get_backend_summary_sources(self, backend=None) -> dict:
+        """Report which backend is providing summaries.
+
+        Args:
+            backend: Optional ContextBackend instance. If provided, includes
+                     backend-specific info.
+
+        Returns:
+            Dict with backend info including type, vault_path, and availability.
+        """
+        info = {
+            "backend": backend.backend_name() if backend else "file",
+            "vault_path": str(self.vault_path),
+            "vault_exists": self.vault_path.exists(),
+            "log_path": str(self.log_path),
+        }
+        if backend:
+            info["backend_available"] = backend.is_available()
+        return info
+
+    def find_context_via_backend(self, backend, task: str, project: Optional[str] = None, limit: int = 10) -> list:
+        """Find relevant context using a ContextBackend instead of file search.
+
+        Args:
+            backend: A ContextBackend instance (LCMBackend or FileBackend).
+            task: Natural language task description.
+            project: Optional project filter.
+            limit: Maximum results.
+
+        Returns:
+            List of context result dicts from the backend.
+        """
+        return backend.find_context(task=task, project=project, limit=limit)
 
 
 def link_summary_to_vault(

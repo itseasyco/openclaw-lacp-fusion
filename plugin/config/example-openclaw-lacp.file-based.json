@@ -1,0 +1,9 @@
+{
+  "openclaw-lacp": {
+    "enabled": true,
+    "config": {
+      "contextEngine": null,
+      "promotionThreshold": 70
+    }
+  }
+}

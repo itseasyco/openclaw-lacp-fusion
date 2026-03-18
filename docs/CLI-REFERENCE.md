@@ -1,4 +1,4 @@
-# CLI Reference — OpenClaw LACP Fusion v1.0.0
+# CLI Reference — OpenClaw LACP Fusion v2.0.0
 
 Complete reference for all CLI commands in the OpenClaw LACP Fusion plugin.
 
@@ -401,3 +401,217 @@ All commands respect these environment variables:
 | `AGENT_ID_STORE` | Agent identity storage | `~/.openclaw/agent-ids` |
 | `LACP_KNOWLEDGE_ROOT` | Knowledge graph storage | `~/.openclaw/data/knowledge` |
 | `GATED_RUNS_LOG` | Gated execution log | `~/.openclaw/logs/gated-runs.jsonl` |
+
+---
+
+## v2-lcm Commands
+
+The following commands were introduced in v2.0.0 for bidirectional LCM integration. All support `--backend lcm|file` to override the config-driven context engine, and `--json` for machine-readable output.
+
+### `openclaw-lacp-promote`
+
+Score and promote LCM session summaries to LACP persistent memory.
+
+#### `openclaw-lacp-promote auto`
+
+Auto-score a summary and promote if it exceeds the threshold.
+
+```bash
+openclaw-lacp-promote auto --summary SUMMARY_ID --project PROJECT [OPTIONS]
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--summary` | Summary ID to evaluate (required) | -- |
+| `--project` | Project name (required) | -- |
+| `--backend` | Override context engine (`lcm` or `file`) | config-driven |
+| `--threshold` | Override promotion threshold (0-100) | 70 |
+| `--dry-run` | Score without writing to LACP | off |
+| `--json` | JSON output | off |
+
+Example:
+
+```bash
+# Score and promote a summary
+openclaw-lacp-promote auto --summary sum_abc123 --project easy-api
+
+# Dry run to check score without promoting
+openclaw-lacp-promote auto --summary sum_abc123 --project easy-api --dry-run --json
+
+# Use LCM backend regardless of config
+openclaw-lacp-promote auto --summary sum_abc123 --project easy-api --backend lcm
+```
+
+#### `openclaw-lacp-promote manual`
+
+Manually promote a fact with score 100 (bypasses scoring).
+
+```bash
+openclaw-lacp-promote manual --summary SUMMARY_ID --fact TEXT --reasoning TEXT [OPTIONS]
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--summary` | Source summary ID (required) | -- |
+| `--fact` | Fact text to promote (required) | -- |
+| `--reasoning` | Why this fact matters (required) | -- |
+| `--project` | Project name | -- |
+| `--backend` | Override context engine | config-driven |
+| `--json` | JSON output | off |
+
+Example:
+
+```bash
+openclaw-lacp-promote manual \
+  --summary sum_abc123 \
+  --fact "Finix is the payment processor" \
+  --reasoning "Core architecture decision"
+```
+
+**Note:** The `--backend` flag overrides the `contextEngine` setting in config for that invocation only. This is useful for testing LCM before switching config, or for one-off file-based lookups.
+
+---
+
+### `openclaw-lacp-context`
+
+Inject LACP facts into LCM session context and query context interactively.
+
+#### `openclaw-lacp-context inject`
+
+Inject relevant facts at session start.
+
+```bash
+openclaw-lacp-context inject --project PROJECT [OPTIONS]
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--project` | Project name (required) | -- |
+| `--agent` | Agent name filter | -- |
+| `--topic` | Topic filter for relevance scoring | -- |
+| `--depth` | Graph/DAG traversal depth | 2 |
+| `--format` | Output format: `text`, `json`, `markdown` | text |
+| `--backend` | Override context engine (`lcm` or `file`) | config-driven |
+| `--discover` | Enable auto-discovery mode (see below) | off |
+| `--since` | ISO date filter (with `--discover`) | -- |
+| `--until` | ISO date filter (with `--discover`) | -- |
+| `--conversation` | Conversation ID filter (with `--discover`, requires lossless-claw) | -- |
+| `--summary` | Specific summary ID to start from | -- |
+| `--json` | JSON output | off |
+
+Example:
+
+```bash
+# Basic injection
+openclaw-lacp-context inject --project easy-api --topic "embedded-checkout"
+
+# With auto-discovery from LCM
+openclaw-lacp-context inject --project easy-api --discover --since 2026-03-11 --backend lcm
+
+# Traverse from a specific summary
+openclaw-lacp-context inject --summary sum_003 --depth 5 --backend lcm --format markdown
+```
+
+**Note:** The `--discover` flag enables auto-discovery of summaries by date/project/conversation. When using the lossless-claw backend, discovery supports conversation-level grouping via `--conversation`. With the file-based backend, discovery scans directories without conversation awareness.
+
+#### `openclaw-lacp-context query`
+
+Query facts interactively by topic.
+
+```bash
+openclaw-lacp-context query --topic TOPIC [OPTIONS]
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--topic` | Topic to search (required) | -- |
+| `--project` | Scope to project | -- |
+| `--min-score` | Minimum relevance score | 50 |
+| `--format` | Output format | text |
+| `--backend` | Override context engine | config-driven |
+| `--json` | JSON output | off |
+
+#### `openclaw-lacp-context list`
+
+List available contexts for a project.
+
+```bash
+openclaw-lacp-context list --project PROJECT [--backend lcm|file] [--json]
+```
+
+---
+
+### `openclaw-lacp-share`
+
+Multi-agent memory sharing (Phase B). Enables cross-agent context queries with access control.
+
+```bash
+openclaw-lacp-share query --from-agent AGENT --project PROJECT [--topic TOPIC] [--backend lcm|file] [--json]
+openclaw-lacp-share grant --to-agent AGENT --project PROJECT [--scope read|write] [--json]
+openclaw-lacp-share revoke --agent AGENT --project PROJECT [--json]
+openclaw-lacp-share list --project PROJECT [--json]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `query` | Query another agent's promoted facts |
+| `grant` | Grant access to your memory for another agent |
+| `revoke` | Revoke a previously granted access |
+| `list` | List current sharing grants for a project |
+
+---
+
+### `openclaw-lacp-calibrate`
+
+Tune promotion scoring weights and thresholds based on historical data.
+
+```bash
+openclaw-lacp-calibrate --project PROJECT [OPTIONS]
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--project` | Project name (required) | -- |
+| `--sample-size` | Number of recent summaries to evaluate | 100 |
+| `--target-rate` | Target promotion rate (0.0-1.0) | 0.2 |
+| `--backend` | Override context engine | config-driven |
+| `--dry-run` | Show recommended changes without applying | off |
+| `--json` | JSON output | off |
+
+Example:
+
+```bash
+# Preview calibration changes
+openclaw-lacp-calibrate --project easy-api --dry-run --json
+
+# Apply calibration
+openclaw-lacp-calibrate --project easy-api --target-rate 0.15
+```
+
+---
+
+### `openclaw-lacp-dedup`
+
+Deduplicate promoted facts in LACP memory. Identifies near-duplicate facts and merges or removes redundant entries.
+
+```bash
+openclaw-lacp-dedup --project PROJECT [OPTIONS]
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--project` | Project name (required) | -- |
+| `--similarity` | Similarity threshold for dedup (0.0-1.0) | 0.85 |
+| `--backend` | Override context engine | config-driven |
+| `--dry-run` | Show duplicates without removing | off |
+| `--json` | JSON output | off |
+
+Example:
+
+```bash
+# Preview duplicates
+openclaw-lacp-dedup --project easy-api --dry-run --json
+
+# Remove duplicates with custom threshold
+openclaw-lacp-dedup --project easy-api --similarity 0.9
+```
