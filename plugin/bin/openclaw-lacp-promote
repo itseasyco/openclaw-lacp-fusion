@@ -56,6 +56,8 @@ OPTIONS:
   --project <name>       Project filter
   --since <date>         Date filter (YYYY-MM-DD)
   --receipt-hash <hash>  Receipt hash to verify
+  --similarity-threshold Dedup threshold 0.0-1.0 (default: 0.85)
+  --calibrate-confidence Auto-calibrate promotion threshold from usage data
   --dry-run              Score but don't actually promote
   --help                 Show this help
 
@@ -444,15 +446,18 @@ log_to_gated_runs() {
 # Full pipeline: read file → score → promote if above threshold
 cmd_pipeline() {
     local file="" project="" threshold=70 dry_run=false category=""
+    local similarity_threshold="0.85" calibrate_confidence=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --file)       file="$2"; shift 2 ;;
-            --project)    project="$2"; shift 2 ;;
-            --threshold)  threshold="$2"; shift 2 ;;
-            --category)   category="$2"; shift 2 ;;
-            --dry-run)    dry_run=true; shift ;;
-            *)            log_error "Unknown option: $1"; exit 1 ;;
+            --file)                  file="$2"; shift 2 ;;
+            --project)               project="$2"; shift 2 ;;
+            --threshold)             threshold="$2"; shift 2 ;;
+            --category)              category="$2"; shift 2 ;;
+            --similarity-threshold)  similarity_threshold="$2"; shift 2 ;;
+            --calibrate-confidence)  calibrate_confidence=true; shift ;;
+            --dry-run)               dry_run=true; shift ;;
+            *)                       log_error "Unknown option: $1"; exit 1 ;;
         esac
     done
 
@@ -537,6 +542,33 @@ print(json.dumps(result))
 
     [[ -n "$category" ]] && score_category="$category"
 
+    # Auto-calibrate threshold from usage data if requested
+    if [[ "$calibrate_confidence" == "true" ]]; then
+        log_info "Running confidence calibration..."
+        local cal_threshold
+        cal_threshold=$(python3 -c "
+import sys
+sys.path.insert(0, '${V2_LCM_DIR}')
+from confidence_calibration import CalibrationTracker
+ct = CalibrationTracker()
+optimal = ct.compute_optimal_threshold()
+if optimal != ct.get_current_threshold():
+    ct.update_threshold(optimal, reason='auto-calibrated by promote pipeline')
+    ct.save()
+print(int(optimal))
+" 2>/dev/null || echo "$threshold")
+        if [[ -n "$cal_threshold" && "$cal_threshold" != "$threshold" ]]; then
+            log_info "Calibrated threshold: ${threshold} → ${cal_threshold}"
+            threshold="$cal_threshold"
+            # Re-evaluate promote decision
+            if [[ $(echo "$score >= $threshold" | bc -l 2>/dev/null || echo "1") -eq 1 ]]; then
+                promote="true"
+            else
+                promote="false"
+            fi
+        fi
+    fi
+
     echo ""
     log_info "Score: ${score}/100 (threshold: ${threshold})"
     log_info "Category: ${score_category}"
@@ -560,6 +592,9 @@ print(json.dumps(result))
         exit 0
     fi
 
+    # Run semantic dedup if similarity threshold is set
+    log_info "Dedup threshold: ${similarity_threshold}"
+
     # Extract top facts for promotion
     local facts_count
     facts_count=$(echo "$facts_json" | python3 -c 'import sys,json; print(len(json.loads(sys.stdin.read())))' 2>/dev/null || echo "0")
@@ -572,6 +607,21 @@ print(json.dumps(result))
             fact=$(echo "$facts_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())[$i])" 2>/dev/null || true)
 
             if [[ -n "$fact" ]]; then
+                # Dedup check
+                local is_dup
+                is_dup=$(python3 -c "
+import sys
+sys.path.insert(0, '${V2_LCM_DIR}')
+from semantic_dedup import SemanticDedup
+dedup = SemanticDedup(vault_path='${VAULT_ROOT}', threshold=${similarity_threshold})
+print('true' if dedup.is_duplicate('''${fact}''') else 'false')
+" 2>/dev/null || echo "false")
+                if [[ "$is_dup" == "true" ]]; then
+                    log_warn "Skipping duplicate fact (similarity >= ${similarity_threshold})"
+                    i=$((i + 1))
+                    continue
+                fi
+
                 local receipt
                 receipt=$(generate_receipt "$summary_id" "$fact" "$score_category" "$score")
                 local r_hash

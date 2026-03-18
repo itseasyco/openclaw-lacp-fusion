@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# openclaw-lacp-dedup — Semantic deduplication for promoted facts
+#
+# Usage:
+#   openclaw-lacp-dedup check --fact <text> [--vault <path>] [--threshold <n>]
+#   openclaw-lacp-dedup batch --file <path> [--vault <path>] [--threshold <n>]
+#   openclaw-lacp-dedup stats
+#
+# Part of OpenClaw LACP v2.0.0 — Phase D (Optimization)
+
+set -eo pipefail
+
+VERSION="2.0.0"
+SCRIPT_NAME="openclaw-lacp-dedup"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+VAULT_ROOT="${OPENCLAW_VAULT_ROOT:-$HOME/.openclaw/vault}"
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+V2_LCM_DIR="${PLUGIN_DIR}/v2-lcm"
+
+log_info()  { echo -e "${BLUE}[info]${NC} $*"; }
+log_ok()    { echo -e "${GREEN}[ok]${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}[warn]${NC} $*"; }
+log_error() { echo -e "${RED}[error]${NC} $*" >&2; }
+
+usage() {
+    cat <<EOF
+${SCRIPT_NAME} v${VERSION} — Semantic Deduplication
+
+COMMANDS:
+  check    Check a single fact for duplicates
+  batch    Check multiple facts from a file
+  stats    Show dedup statistics
+
+OPTIONS:
+  --fact <text>         Fact text to check
+  --file <path>         File with facts (one per line)
+  --vault <path>        Vault path (default: \$OPENCLAW_VAULT_ROOT)
+  --threshold <n>       Similarity threshold 0.0-1.0 (default: 0.85)
+  --help                Show this help
+
+EXAMPLES:
+  $SCRIPT_NAME check --fact "Finix handles payment processing"
+  $SCRIPT_NAME batch --file facts.txt --threshold 0.90
+  $SCRIPT_NAME stats
+EOF
+    exit 0
+}
+
+cmd_check() {
+    local fact="" vault="$VAULT_ROOT" threshold="0.85"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --fact)       fact="$2"; shift 2 ;;
+            --vault)      vault="$2"; shift 2 ;;
+            --threshold)  threshold="$2"; shift 2 ;;
+            *)            log_error "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    if [[ -z "$fact" ]]; then
+        log_error "Missing required --fact"
+        exit 1
+    fi
+
+    log_info "Checking for duplicates (threshold: ${threshold})"
+
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from semantic_dedup import SemanticDedup
+
+dedup = SemanticDedup(vault_path='${vault}', threshold=${threshold})
+is_dup = dedup.is_duplicate('''${fact}''')
+matches = dedup.find_similar('''${fact}''', threshold=${threshold}, max_results=3)
+result = {
+    'is_duplicate': is_dup,
+    'threshold': ${threshold},
+    'decision': 'skip' if is_dup else 'promote',
+    'matches': matches,
+}
+print(json.dumps(result, indent=2))
+" 2>/dev/null
+
+    if [[ $? -ne 0 ]]; then
+        log_error "Dedup check failed — check Python module"
+        exit 1
+    fi
+}
+
+cmd_batch() {
+    local file="" vault="$VAULT_ROOT" threshold="0.85"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --file)       file="$2"; shift 2 ;;
+            --vault)      vault="$2"; shift 2 ;;
+            --threshold)  threshold="$2"; shift 2 ;;
+            *)            log_error "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    if [[ -z "$file" || ! -f "$file" ]]; then
+        log_error "Missing or invalid --file"
+        exit 1
+    fi
+
+    log_info "Batch dedup check from ${file}"
+
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from semantic_dedup import SemanticDedup
+
+dedup = SemanticDedup(vault_path='${vault}', threshold=${threshold})
+facts = [line.strip() for line in open('${file}') if line.strip()]
+
+dups = 0
+for fact in facts:
+    is_dup = dedup.is_duplicate(fact)
+    status = 'SKIP' if is_dup else 'OK'
+    matches = dedup.find_similar(fact, max_results=1)
+    sim = matches[0]['similarity'] if matches else 0.0
+    print(f'[{status}] sim={sim:.3f} — {fact[:60]}')
+    if is_dup:
+        dups += 1
+
+print(f'\nTotal: {len(facts)}, Duplicates: {dups}, Unique: {len(facts) - dups}')
+" 2>/dev/null
+}
+
+cmd_stats() {
+    local dedup_log="${HOME}/.openclaw/logs/dedup.jsonl"
+
+    if [[ ! -f "$dedup_log" ]]; then
+        log_warn "No dedup log found"
+        exit 0
+    fi
+
+    log_info "Dedup statistics"
+
+    local total
+    total=$(wc -l < "$dedup_log" | tr -d ' ')
+    local dups
+    dups=$(grep -c '"is_duplicate": true' "$dedup_log" 2>/dev/null || echo "0")
+    local unique
+    unique=$((total - dups))
+
+    echo ""
+    echo "  Total checks: ${total}"
+    echo "  Duplicates found: ${dups}"
+    echo "  Unique facts: ${unique}"
+    if [[ $total -gt 0 ]]; then
+        local rate
+        rate=$(echo "scale=1; $dups * 100 / $total" | bc 2>/dev/null || echo "?")
+        echo "  Dedup rate: ${rate}%"
+    fi
+}
+
+# --- Main ---
+
+main() {
+    if [[ $# -eq 0 ]]; then
+        usage
+    fi
+
+    local command="$1"
+    shift
+
+    case "$command" in
+        check)    cmd_check "$@" ;;
+        batch)    cmd_batch "$@" ;;
+        stats)    cmd_stats "$@" ;;
+        --help|-h) usage ;;
+        --version|-v) echo "${SCRIPT_NAME} v${VERSION}" ;;
+        *)
+            log_error "Unknown command: $command"
+            usage
+            ;;
+    esac
+}
+
+main "$@"

@@ -414,7 +414,7 @@ cmd_list() {
         echo "  Path: ${vault_dir}"
         echo "  Notes: ${count}"
         local link_count
-        link_count=$(grep -r '\[\[' "$vault_dir" 2>/dev/null | wc -l | tr -d ' ')
+        link_count=$(grep -rc '\[\[' "$vault_dir" 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}' || echo "0")
         echo "  Wikilinks: ${link_count}"
     else
         echo "  (not initialized)"

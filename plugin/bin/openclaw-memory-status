@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+# openclaw-memory-status — Memory & context health dashboard
+set -eo pipefail
+
+VERSION="2.0.0"
+SCRIPT_NAME="openclaw-memory-status"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+VAULT_ROOT="${OPENCLAW_VAULT_ROOT:-$HOME/.openclaw/vault}"
+MEMORY_ROOT="${OPENCLAW_MEMORY_ROOT:-$HOME/.openclaw/memory}"
+PROMOTIONS_LOG="${OPENCLAW_PROMOTIONS_LOG:-$HOME/.openclaw/logs/promotions.jsonl}"
+GATED_RUNS_LOG="${OPENCLAW_GATED_RUNS_LOG:-$HOME/.openclaw/logs/gated-runs.jsonl}"
+CACHE_DIR="${OPENCLAW_CACHE_DIR:-$HOME/.openclaw/vault/.openclaw-lacp-embeddings}"
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+log_info()  { echo -e "${BLUE}[info]${NC} $*"; }
+log_ok()    { echo -e "${GREEN}[ok]${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}[warn]${NC} $*"; }
+log_error() { echo -e "${RED}[error]${NC} $*" >&2; }
+
+usage() {
+    cat <<EOF
+${SCRIPT_NAME} v${VERSION} — Memory & context health dashboard
+
+USAGE:
+  $SCRIPT_NAME [/path/to/vault] [--project <name>] [--json]
+
+OPTIONS:
+  --project <name>    Filter by project
+  --json              Output as JSON
+  --help              Show this help
+
+SECTIONS:
+  Recent Promotions    Last 10 facts promoted to LACP
+  Injection History    Last 10 context injections
+  Confidence Trends    Average score over time
+  Graph Health         Total facts, connections, orphans
+  Dedup Status         Cached vs live embeddings
+
+EXAMPLES:
+  $SCRIPT_NAME
+  $SCRIPT_NAME /path/to/vault --project easy-api
+  $SCRIPT_NAME --json
+EOF
+    exit 0
+}
+
+# Parse args
+VAULT_ARG=""
+PROJECT=""
+JSON_OUTPUT=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --project)   PROJECT="$2"; shift 2 ;;
+        --json)      JSON_OUTPUT=true; shift ;;
+        --help|-h)   usage ;;
+        --version|-v) echo "${SCRIPT_NAME} v${VERSION}"; exit 0 ;;
+        *)
+            if [[ -z "$VAULT_ARG" && ! "$1" =~ ^-- ]]; then
+                VAULT_ARG="$1"; shift
+            else
+                log_error "Unknown option: $1"; exit 1
+            fi
+            ;;
+    esac
+done
+
+[[ -n "$VAULT_ARG" ]] && VAULT_ROOT="$VAULT_ARG"
+
+# --- Section: Recent Promotions ---
+show_recent_promotions() {
+    echo -e "\n${BOLD}=== Recent Promotions (last 10) ===${NC}"
+
+    if [[ ! -f "$PROMOTIONS_LOG" ]]; then
+        echo "  (no promotions log found)"
+        return
+    fi
+
+    local lines
+    lines=$(tail -10 "$PROMOTIONS_LOG" 2>/dev/null || true)
+
+    if [[ -z "$lines" ]]; then
+        echo "  (no promotions recorded)"
+        return
+    fi
+
+    local count=0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+
+        # Filter by project if specified
+        if [[ -n "$PROJECT" ]] && ! echo "$line" | grep -qi "$PROJECT"; then
+            continue
+        fi
+
+        if command -v jq &>/dev/null; then
+            local ts cat score sid
+            ts=$(echo "$line" | jq -r '.timestamp // "?"' 2>/dev/null || echo "?")
+            cat=$(echo "$line" | jq -r '.category // "?"' 2>/dev/null || echo "?")
+            score=$(echo "$line" | jq -r '.score // "?"' 2>/dev/null || echo "?")
+            sid=$(echo "$line" | jq -r '.summary_id // "?"' 2>/dev/null || echo "?")
+            echo -e "  ${CYAN}${ts}${NC}  score=${GREEN}${score}${NC}  cat=${cat}  id=${sid}"
+        else
+            echo "  $line"
+        fi
+        count=$((count + 1))
+    done <<< "$lines"
+
+    echo -e "  ${BOLD}Total shown: ${count}${NC}"
+}
+
+# --- Section: Injection History ---
+show_injection_history() {
+    echo -e "\n${BOLD}=== Injection History (last 10) ===${NC}"
+
+    if [[ ! -f "$GATED_RUNS_LOG" ]]; then
+        echo "  (no gated-runs log found)"
+        return
+    fi
+
+    local lines
+    lines=$(grep -i '"inject\|"context_inject\|"injection"' "$GATED_RUNS_LOG" 2>/dev/null | tail -10 || true)
+
+    if [[ -z "$lines" ]]; then
+        # Fall back: show any recent events
+        lines=$(tail -10 "$GATED_RUNS_LOG" 2>/dev/null || true)
+    fi
+
+    if [[ -z "$lines" ]]; then
+        echo "  (no injection events recorded)"
+        return
+    fi
+
+    local count=0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+
+        if [[ -n "$PROJECT" ]] && ! echo "$line" | grep -qi "$PROJECT"; then
+            continue
+        fi
+
+        if command -v jq &>/dev/null; then
+            local ts event
+            ts=$(echo "$line" | jq -r '.timestamp // "?"' 2>/dev/null || echo "?")
+            event=$(echo "$line" | jq -r '.event // .task // "?"' 2>/dev/null || echo "?")
+            echo -e "  ${CYAN}${ts}${NC}  event=${event}"
+        else
+            echo "  $line"
+        fi
+        count=$((count + 1))
+    done <<< "$lines"
+
+    echo -e "  ${BOLD}Total shown: ${count}${NC}"
+}
+
+# --- Section: Confidence Trends ---
+show_confidence_trends() {
+    echo -e "\n${BOLD}=== Confidence Trends ===${NC}"
+
+    if [[ ! -f "$PROMOTIONS_LOG" ]]; then
+        echo "  (no data)"
+        return
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        echo "  (requires jq for trend analysis)"
+        return
+    fi
+
+    local total_score=0
+    local count=0
+    local min_score=100
+    local max_score=0
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local score
+        score=$(echo "$line" | jq -r '.score // 0' 2>/dev/null || echo "0")
+        if [[ "$score" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+            total_score=$(echo "$total_score + $score" | bc 2>/dev/null || echo "$total_score")
+            count=$((count + 1))
+            # Track min/max using integer comparison
+            local int_score=${score%.*}
+            [[ $int_score -lt $min_score ]] && min_score=$int_score
+            [[ $int_score -gt $max_score ]] && max_score=$int_score
+        fi
+    done < "$PROMOTIONS_LOG"
+
+    if [[ $count -eq 0 ]]; then
+        echo "  (no scored promotions)"
+        return
+    fi
+
+    local avg
+    avg=$(echo "scale=1; $total_score / $count" | bc 2>/dev/null || echo "?")
+
+    echo -e "  Promotions scored: ${BOLD}${count}${NC}"
+    echo -e "  Average score:     ${GREEN}${avg}${NC}"
+    echo -e "  Score range:       ${min_score} — ${max_score}"
+}
+
+# --- Section: Graph Health ---
+show_graph_health() {
+    echo -e "\n${BOLD}=== Graph Health ===${NC}"
+
+    if [[ ! -d "$VAULT_ROOT" ]]; then
+        echo "  Vault: (not found at ${VAULT_ROOT})"
+        return
+    fi
+
+    # Count facts (markdown files)
+    local total_notes
+    total_notes=$(find "$VAULT_ROOT" -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    echo -e "  Total notes:    ${BOLD}${total_notes}${NC}"
+
+    # Count wikilinks (connections)
+    local total_links
+    total_links=$(grep -r '\[\[' "$VAULT_ROOT" 2>/dev/null | wc -l | tr -d ' ')
+    echo -e "  Wikilinks:      ${BOLD}${total_links}${NC}"
+
+    # Count orphan notes (no incoming links)
+    local orphans=0
+    if [[ "$total_notes" -gt 0 ]]; then
+        while IFS= read -r note; do
+            local stem
+            stem=$(basename "$note" .md)
+            if ! grep -rl "\[\[${stem}\]\]" "$VAULT_ROOT" &>/dev/null; then
+                orphans=$((orphans + 1))
+            fi
+        done < <(find "$VAULT_ROOT" -name "*.md" 2>/dev/null | head -50)
+    fi
+    echo -e "  Orphan notes:   ${YELLOW}${orphans}${NC} (of first 50 checked)"
+
+    # Memory root stats
+    if [[ -d "$MEMORY_ROOT" ]]; then
+        local mem_files
+        mem_files=$(find "$MEMORY_ROOT" -name "*.md" -o -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+        echo -e "  Memory files:   ${BOLD}${mem_files}${NC}"
+
+        local projects
+        projects=$(find "$MEMORY_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+        echo -e "  Projects:       ${BOLD}${projects}${NC}"
+    else
+        echo "  Memory root:    (not found)"
+    fi
+}
+
+# --- Section: Dedup Status ---
+show_dedup_status() {
+    echo -e "\n${BOLD}=== Dedup Cache Status ===${NC}"
+
+    local cache_file="${CACHE_DIR}/embedding_cache.json"
+
+    if [[ ! -f "$cache_file" ]]; then
+        echo "  Cache: (not initialized)"
+        echo "  Status: ${GREEN}live mode${NC} (no cached embeddings)"
+        return
+    fi
+
+    if command -v jq &>/dev/null; then
+        local cached_count
+        cached_count=$(jq 'length' "$cache_file" 2>/dev/null || echo "0")
+        echo -e "  Cached embeddings: ${BOLD}${cached_count}${NC}"
+    else
+        local size
+        size=$(wc -c < "$cache_file" 2>/dev/null | tr -d ' ')
+        echo -e "  Cache file size:   ${BOLD}${size} bytes${NC}"
+    fi
+
+    local cache_size
+    cache_size=$(du -sh "$CACHE_DIR" 2>/dev/null | cut -f1 || echo "?")
+    echo -e "  Cache directory:   ${cache_size}"
+    echo -e "  Status:            ${GREEN}active${NC}"
+}
+
+# --- JSON output ---
+output_json() {
+    # Collect stats into JSON
+    local total_notes=0 total_links=0 mem_files=0 projects=0
+
+    if [[ -d "$VAULT_ROOT" ]]; then
+        total_notes=$(find "$VAULT_ROOT" -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+        total_links=$(grep -r '\[\[' "$VAULT_ROOT" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+
+    if [[ -d "$MEMORY_ROOT" ]]; then
+        mem_files=$(find "$MEMORY_ROOT" -name "*.md" -o -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+        projects=$(find "$MEMORY_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+    fi
+
+    local promo_count=0
+    if [[ -f "$PROMOTIONS_LOG" ]]; then
+        promo_count=$(wc -l < "$PROMOTIONS_LOG" 2>/dev/null | tr -d ' ')
+    fi
+
+    local cached_count=0
+    local cache_file="${CACHE_DIR}/embedding_cache.json"
+    if [[ -f "$cache_file" ]] && command -v jq &>/dev/null; then
+        cached_count=$(jq 'length' "$cache_file" 2>/dev/null || echo "0")
+    fi
+
+    cat <<JSON
+{
+  "version": "${VERSION}",
+  "vault_root": "${VAULT_ROOT}",
+  "memory_root": "${MEMORY_ROOT}",
+  "project_filter": "${PROJECT}",
+  "graph": {
+    "total_notes": ${total_notes},
+    "wikilinks": ${total_links},
+    "memory_files": ${mem_files},
+    "projects": ${projects}
+  },
+  "promotions": {
+    "total": ${promo_count}
+  },
+  "dedup_cache": {
+    "cached_embeddings": ${cached_count}
+  }
+}
+JSON
+}
+
+# --- Main ---
+main() {
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        output_json
+        exit 0
+    fi
+
+    echo -e "${BOLD}${SCRIPT_NAME} v${VERSION}${NC}"
+    echo -e "Vault: ${VAULT_ROOT}"
+    echo -e "Memory: ${MEMORY_ROOT}"
+    [[ -n "$PROJECT" ]] && echo -e "Project: ${PROJECT}"
+
+    show_recent_promotions
+    show_injection_history
+    show_confidence_trends
+    show_graph_health
+    show_dedup_status
+
+    echo ""
+    log_ok "Dashboard complete"
+}
+
+main

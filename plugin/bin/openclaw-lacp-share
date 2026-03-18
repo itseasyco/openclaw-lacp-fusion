@@ -1,105 +1,281 @@
 #!/usr/bin/env bash
-# openclaw-lacp-share — Multi-Agent Memory Sharing (Phase B stubs)
+# openclaw-lacp-share — Multi-Agent Memory Sharing
 #
 # Usage:
-#   openclaw-lacp-share list-available --from <agent>
-#   openclaw-lacp-share query --from <agent> --topic <topic>
-#   openclaw-lacp-share grant-access --agent <agent> --to <agent>
+#   openclaw-lacp-share register --agent <id> [--display-name <name>]
+#   openclaw-lacp-share grant --agent <id> --project <project> --role <role>
+#   openclaw-lacp-share revoke --agent <id> --project <project>
+#   openclaw-lacp-share check --agent <id> --project <project>
+#   openclaw-lacp-share list-agents [--project <project>]
+#   openclaw-lacp-share list-projects [--agent <id>]
+#   openclaw-lacp-share summary
 #
-# Part of OpenClaw LACP v2.0.0 — Phase B (Multi-Agent Sharing)
-# These commands are stubs for future implementation.
+# Part of OpenClaw LACP v2.0.0 — Phase D (Optimization)
 
-set -euo pipefail
+set -eo pipefail
 
 VERSION="2.0.0"
 SCRIPT_NAME="openclaw-lacp-share"
 
 # Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+V2_LCM_DIR="${PLUGIN_DIR}/v2-lcm"
+DEFAULT_POLICY_FILE="${HOME}/.openclaw/config/.openclaw-lacp-sharing.json"
+
 log_info()  { echo -e "${BLUE}[info]${NC} $*"; }
+log_ok()    { echo -e "${GREEN}[ok]${NC} $*"; }
 log_warn()  { echo -e "${YELLOW}[warn]${NC} $*"; }
+log_error() { echo -e "${RED}[error]${NC} $*" >&2; }
 
 usage() {
     cat <<EOF
-${SCRIPT_NAME} v${VERSION} — Multi-Agent Memory Sharing (Phase B)
-
-NOTE: These commands are stubs for Phase B implementation.
+${SCRIPT_NAME} v${VERSION} — Multi-Agent Memory Sharing
 
 COMMANDS:
-  list-available   List shared memory available from an agent
-  query            Query shared facts from another agent
-  grant-access     Grant memory access between agents
+  register       Register a new agent
+  grant          Grant agent access to a project with a role
+  revoke         Revoke agent access to a project
+  check          Check agent permissions on a project
+  list-agents    List all registered agents
+  list-projects  List all projects with sharing
+  summary        Show policy summary
 
 OPTIONS:
-  --from <agent>     Source agent name
-  --to <agent>       Target agent name
-  --agent <agent>    Agent name
-  --topic <topic>    Topic to query
-  --help             Show this help
+  --agent <id>          Agent identifier
+  --display-name <name> Agent display name (register)
+  --project <project>   Project name
+  --role <role>         Role: reader, writer, curator
+  --policy-file <path>  Path to sharing policy file
+  --json                Output as JSON
+  --help                Show this help
+
+ROLES:
+  reader    Read LACP facts
+  writer    Read + promote facts
+  curator   Read + promote + edit + delete + manage
 
 EXAMPLES:
-  $SCRIPT_NAME list-available --from wren
-  $SCRIPT_NAME query --from wren --topic "settlement"
-  $SCRIPT_NAME grant-access --agent wren --to zoe
+  $SCRIPT_NAME register --agent wren --display-name "Wren Agent"
+  $SCRIPT_NAME grant --agent wren --project easy-api --role writer
+  $SCRIPT_NAME check --agent wren --project easy-api
+  $SCRIPT_NAME list-agents
+  $SCRIPT_NAME revoke --agent wren --project easy-api
+  $SCRIPT_NAME summary --json
+  $SCRIPT_NAME --policy-file /path/to/policy.json list-agents
 EOF
     exit 0
 }
 
-stub_message() {
-    local command="$1"
-    echo ""
-    log_warn "Command '${command}' is a Phase B stub"
-    echo "  This feature will be implemented in OpenClaw LACP v2.1.0"
-    echo "  See: docs/v2-lcm-integration.md for the roadmap"
-    echo ""
-    echo "  Phase B will include:"
-    echo "    - Cross-agent memory queries"
-    echo "    - Granular access control"
-    echo "    - Shared fact deduplication"
-    echo "    - Agent trust scoring"
-    echo ""
-    exit 0
-}
+POLICY_FILE="$DEFAULT_POLICY_FILE"
+JSON_OUTPUT=false
 
-cmd_list_available() {
-    local from=""
+cmd_register() {
+    local agent="" display_name=""
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --from) from="$2"; shift 2 ;;
-            *)      shift ;;
+            --agent)        agent="$2"; shift 2 ;;
+            --display-name) display_name="$2"; shift 2 ;;
+            *)              log_error "Unknown option: $1"; exit 1 ;;
         esac
     done
-    log_info "list-available from=${from:-unspecified}"
-    stub_message "list-available"
+
+    if [[ -z "$agent" ]]; then
+        log_error "Missing required --agent"
+        exit 1
+    fi
+
+    local result
+    result=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${POLICY_FILE}')
+entry = sp.register_agent('${agent}', display_name='${display_name}')
+sp.save()
+print(json.dumps({'agent': '${agent}', 'display_name': entry.get('display_name', '${agent}'), 'registered': True}, indent=2))
+" 2>/dev/null)
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$result"
+    else
+        log_ok "Registered agent '${agent}'"
+    fi
 }
 
-cmd_query() {
-    local from="" topic=""
+cmd_grant() {
+    local agent="" project="" role=""
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --from)  from="$2"; shift 2 ;;
-            --topic) topic="$2"; shift 2 ;;
-            *)       shift ;;
+            --agent)   agent="$2"; shift 2 ;;
+            --project) project="$2"; shift 2 ;;
+            --role)    role="$2"; shift 2 ;;
+            *)         log_error "Unknown option: $1"; exit 1 ;;
         esac
     done
-    log_info "query from=${from:-unspecified} topic=${topic:-unspecified}"
-    stub_message "query"
+
+    if [[ -z "$agent" || -z "$project" || -z "$role" ]]; then
+        log_error "Missing required --agent, --project, and --role"
+        exit 1
+    fi
+
+    local result
+    result=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${POLICY_FILE}')
+ok = sp.grant_access('${agent}', '${project}', '${role}')
+sp.save()
+print(json.dumps({'success': ok, 'agent': '${agent}', 'project': '${project}', 'role': '${role}'}, indent=2))
+" 2>/dev/null)
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$result"
+    else
+        if echo "$result" | grep -q '"success": true'; then
+            log_ok "Granted '${role}' access to '${agent}' on '${project}'"
+        else
+            log_error "Failed to grant access (invalid role?)"
+            exit 1
+        fi
+    fi
 }
 
-cmd_grant_access() {
-    local agent="" to=""
+cmd_revoke() {
+    local agent="" project=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent)   agent="$2"; shift 2 ;;
+            --project) project="$2"; shift 2 ;;
+            *)         log_error "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    if [[ -z "$agent" || -z "$project" ]]; then
+        log_error "Missing required --agent and --project"
+        exit 1
+    fi
+
+    local result
+    result=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${POLICY_FILE}')
+ok = sp.revoke_access('${agent}', '${project}')
+sp.save()
+print(json.dumps({'success': ok, 'agent': '${agent}', 'project': '${project}'}, indent=2))
+" 2>/dev/null)
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$result"
+    else
+        if echo "$result" | grep -q '"success": true'; then
+            log_ok "Revoked '${agent}' access to '${project}'"
+        else
+            log_warn "Agent '${agent}' had no access to '${project}'"
+        fi
+    fi
+}
+
+cmd_check() {
+    local agent="" project=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent)   agent="$2"; shift 2 ;;
+            --project) project="$2"; shift 2 ;;
+            *)         log_error "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    if [[ -z "$agent" || -z "$project" ]]; then
+        log_error "Missing required --agent and --project"
+        exit 1
+    fi
+
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${POLICY_FILE}')
+role = sp.get_role('${agent}', '${project}')
+print(json.dumps({
+    'agent': '${agent}',
+    'project': '${project}',
+    'role': role,
+    'can_read': sp.can_read('${agent}', '${project}'),
+    'can_promote': sp.can_promote('${agent}', '${project}'),
+    'can_edit': sp.can_edit('${agent}', '${project}'),
+    'can_delete': sp.can_delete('${agent}', '${project}'),
+}, indent=2))
+" 2>/dev/null
+}
+
+cmd_list_agents() {
+    local project=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project) project="$2"; shift 2 ;;
+            *)         log_error "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${POLICY_FILE}')
+project = '${project}' if '${project}' else None
+agents = sp.list_agents(project=project)
+print(json.dumps(agents, indent=2, default=str))
+" 2>/dev/null
+}
+
+cmd_list_projects() {
+    local agent=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --agent) agent="$2"; shift 2 ;;
-            --to)    to="$2"; shift 2 ;;
-            *)       shift ;;
+            *)       log_error "Unknown option: $1"; exit 1 ;;
         esac
     done
-    log_info "grant-access agent=${agent:-unspecified} to=${to:-unspecified}"
-    stub_message "grant-access"
+
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${POLICY_FILE}')
+agent_id = '${agent}' if '${agent}' else None
+projects = sp.list_projects(agent_id=agent_id)
+print(json.dumps(projects, indent=2, default=str))
+" 2>/dev/null
+}
+
+cmd_summary() {
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${POLICY_FILE}')
+print(json.dumps(sp.policy_summary(), indent=2, default=str))
+" 2>/dev/null
 }
 
 # --- Main ---
@@ -109,17 +285,37 @@ main() {
         usage
     fi
 
+    # Pre-parse global options
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --policy-file) POLICY_FILE="$2"; shift 2 ;;
+            --json)        JSON_OUTPUT=true; shift ;;
+            --help|-h)     usage ;;
+            --version|-v)  echo "${SCRIPT_NAME} v${VERSION}"; exit 0 ;;
+            *)             args+=("$1"); shift ;;
+        esac
+    done
+
+    set -- "${args[@]}"
+
+    if [[ $# -eq 0 ]]; then
+        usage
+    fi
+
     local command="$1"
     shift
 
     case "$command" in
-        list-available)  cmd_list_available "$@" ;;
-        query)           cmd_query "$@" ;;
-        grant-access)    cmd_grant_access "$@" ;;
-        --help|-h)       usage ;;
-        --version|-v)    echo "${SCRIPT_NAME} v${VERSION}" ;;
+        register)       cmd_register "$@" ;;
+        grant)          cmd_grant "$@" ;;
+        revoke)         cmd_revoke "$@" ;;
+        check)          cmd_check "$@" ;;
+        list-agents)    cmd_list_agents "$@" ;;
+        list-projects)  cmd_list_projects "$@" ;;
+        summary)        cmd_summary ;;
         *)
-            log_warn "Unknown command: $command"
+            log_error "Unknown command: $command"
             usage
             ;;
     esac
