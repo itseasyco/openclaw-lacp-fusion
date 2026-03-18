@@ -1,0 +1,342 @@
+#!/usr/bin/env bash
+# openclaw-lacp-policies — View and manage multi-agent sharing policies
+set -eo pipefail
+
+VERSION="2.0.0"
+SCRIPT_NAME="openclaw-lacp-policies"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+VAULT_ROOT="${OPENCLAW_VAULT_ROOT:-$HOME/.openclaw/vault}"
+CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw/config}"
+SHARING_CONFIG="${CONFIG_DIR}/.openclaw-lacp-sharing.json"
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+V2_LCM_DIR="${PLUGIN_DIR}/v2-lcm"
+
+log_info()  { echo -e "${BLUE}[info]${NC} $*"; }
+log_ok()    { echo -e "${GREEN}[ok]${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}[warn]${NC} $*"; }
+log_error() { echo -e "${RED}[error]${NC} $*" >&2; }
+
+usage() {
+    cat <<EOF
+${SCRIPT_NAME} v${VERSION} — Multi-agent sharing policies
+
+USAGE:
+  $SCRIPT_NAME [/path/to/vault] <command> [OPTIONS]
+
+COMMANDS:
+  list-agents          List all registered agents
+  list-projects        List all projects with sharing
+  grant                Grant agent access to a project
+  revoke               Revoke agent access
+  check                Check if agent has permission
+  summary              Show policy summary
+
+OPTIONS:
+  --agent <id>         Agent identifier
+  --project <name>     Project name
+  --role <role>        Role: reader, writer, curator
+  --config <path>      Path to sharing config
+  --json               Output as JSON
+  --help               Show this help
+
+ROLES:
+  reader    Read LACP facts
+  writer    Read + promote facts
+  curator   Read + promote + edit + delete + manage
+
+EXAMPLES:
+  $SCRIPT_NAME --list-agents
+  $SCRIPT_NAME --grant agent-a reader my-project
+  $SCRIPT_NAME --revoke agent-b my-project
+  $SCRIPT_NAME --check agent-a my-project read
+  $SCRIPT_NAME list-agents --project my-project
+  $SCRIPT_NAME grant --agent wren --role writer --project easy-api
+  $SCRIPT_NAME summary --json
+EOF
+    exit 0
+}
+
+# Parse args
+VAULT_ARG=""
+COMMAND=""
+AGENT=""
+PROJECT=""
+ROLE=""
+PERMISSION=""
+JSON_OUTPUT=false
+
+# Handle first positional arg as vault or command
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            list-agents)    COMMAND="list-agents"; shift ;;
+            list-projects)  COMMAND="list-projects"; shift ;;
+            grant)          COMMAND="grant"; shift ;;
+            revoke)         COMMAND="revoke"; shift ;;
+            check)          COMMAND="check"; shift ;;
+            summary)        COMMAND="summary"; shift ;;
+            --list-agents)  COMMAND="list-agents"; shift ;;
+            --grant)        COMMAND="grant"; AGENT="$2"; ROLE="$3"; PROJECT="$4"; shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift ;;
+            --revoke)       COMMAND="revoke"; AGENT="$2"; PROJECT="$3"; shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift ;;
+            --check)        COMMAND="check"; AGENT="$2"; PROJECT="$3"; PERMISSION="$4"; shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift ;;
+            --agent)        AGENT="$2"; shift 2 ;;
+            --project)      PROJECT="$2"; shift 2 ;;
+            --role)         ROLE="$2"; shift 2 ;;
+            --config)       SHARING_CONFIG="$2"; shift 2 ;;
+            --json)         JSON_OUTPUT=true; shift ;;
+            --help|-h)      usage ;;
+            --version|-v)   echo "${SCRIPT_NAME} v${VERSION}"; exit 0 ;;
+            *)
+                if [[ -z "$VAULT_ARG" && ! "$1" =~ ^-- && -z "$COMMAND" ]]; then
+                    VAULT_ARG="$1"; shift
+                else
+                    log_error "Unknown option: $1"; exit 1
+                fi
+                ;;
+        esac
+    done
+}
+
+parse_args "$@"
+
+[[ -n "$VAULT_ARG" ]] && VAULT_ROOT="$VAULT_ARG"
+
+cmd_list_agents() {
+    local project_filter=""
+    [[ -n "$PROJECT" ]] && project_filter="project='${PROJECT}'"
+
+    local result
+    result=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${SHARING_CONFIG}')
+agents = sp.list_agents(project=$([ -n '${PROJECT}' ] && echo \"'${PROJECT}'\" || echo 'None'))
+print(json.dumps(agents, indent=2, default=str))
+" 2>/dev/null)
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$result"
+        return
+    fi
+
+    echo -e "${BOLD}=== Registered Agents ===${NC}"
+    if [[ -z "$result" || "$result" == "[]" ]]; then
+        echo "  (no agents registered)"
+        return
+    fi
+
+    if command -v jq &>/dev/null; then
+        echo "$result" | jq -r '.[] | "  \(.agent_id) — \(.display_name // .agent_id) \(.role // "")"' 2>/dev/null || echo "$result"
+    else
+        echo "$result"
+    fi
+}
+
+cmd_list_projects() {
+    local result
+    result=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${SHARING_CONFIG}')
+projects = sp.list_projects(agent_id=$([ -n '${AGENT}' ] && echo \"'${AGENT}'\" || echo 'None'))
+print(json.dumps(projects, indent=2, default=str))
+" 2>/dev/null)
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$result"
+        return
+    fi
+
+    echo -e "${BOLD}=== Projects ===${NC}"
+    if [[ -z "$result" || "$result" == "[]" ]]; then
+        echo "  (no projects configured)"
+        return
+    fi
+
+    if command -v jq &>/dev/null; then
+        echo "$result" | jq -r '.[] | "  \(.project) — agents: \(.agents // .role // "?")"' 2>/dev/null || echo "$result"
+    else
+        echo "$result"
+    fi
+}
+
+cmd_grant() {
+    if [[ -z "$AGENT" || -z "$ROLE" || -z "$PROJECT" ]]; then
+        log_error "Grant requires --agent, --role, and --project"
+        echo "  Usage: $SCRIPT_NAME grant --agent <id> --role <role> --project <name>"
+        exit 1
+    fi
+
+    local result
+    result=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${SHARING_CONFIG}')
+ok = sp.grant_access('${AGENT}', '${PROJECT}', '${ROLE}')
+sp.save()
+print(json.dumps({'success': ok, 'agent': '${AGENT}', 'project': '${PROJECT}', 'role': '${ROLE}'}))
+" 2>/dev/null)
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$result"
+        return
+    fi
+
+    if echo "$result" | grep -q '"success": true'; then
+        log_ok "Granted ${ROLE} access to ${AGENT} on ${PROJECT}"
+    else
+        log_error "Failed to grant access (invalid role?)"
+        exit 1
+    fi
+}
+
+cmd_revoke() {
+    if [[ -z "$AGENT" || -z "$PROJECT" ]]; then
+        log_error "Revoke requires --agent and --project"
+        exit 1
+    fi
+
+    local result
+    result=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${SHARING_CONFIG}')
+ok = sp.revoke_access('${AGENT}', '${PROJECT}')
+sp.save()
+print(json.dumps({'success': ok, 'agent': '${AGENT}', 'project': '${PROJECT}'}))
+" 2>/dev/null)
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$result"
+        return
+    fi
+
+    if echo "$result" | grep -q '"success": true'; then
+        log_ok "Revoked ${AGENT}'s access to ${PROJECT}"
+    else
+        log_warn "Agent ${AGENT} had no access to ${PROJECT}"
+    fi
+}
+
+cmd_check() {
+    if [[ -z "$AGENT" || -z "$PROJECT" ]]; then
+        log_error "Check requires --agent and --project"
+        exit 1
+    fi
+
+    local result
+    result=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${SHARING_CONFIG}')
+role = sp.get_role('${AGENT}', '${PROJECT}')
+can_read = sp.can_read('${AGENT}', '${PROJECT}')
+can_promote = sp.can_promote('${AGENT}', '${PROJECT}')
+can_edit = sp.can_edit('${AGENT}', '${PROJECT}')
+can_delete = sp.can_delete('${AGENT}', '${PROJECT}')
+print(json.dumps({
+    'agent': '${AGENT}',
+    'project': '${PROJECT}',
+    'role': role,
+    'can_read': can_read,
+    'can_promote': can_promote,
+    'can_edit': can_edit,
+    'can_delete': can_delete,
+}))
+" 2>/dev/null)
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$result"
+        return
+    fi
+
+    if command -v jq &>/dev/null; then
+        local role
+        role=$(echo "$result" | jq -r '.role // "none"' 2>/dev/null)
+        echo -e "${BOLD}Agent:${NC} ${AGENT}"
+        echo -e "${BOLD}Project:${NC} ${PROJECT}"
+        echo -e "${BOLD}Role:${NC} ${role}"
+        echo ""
+        echo -e "  Read:    $(echo "$result" | jq -r 'if .can_read then "✓" else "✗" end' 2>/dev/null)"
+        echo -e "  Promote: $(echo "$result" | jq -r 'if .can_promote then "✓" else "✗" end' 2>/dev/null)"
+        echo -e "  Edit:    $(echo "$result" | jq -r 'if .can_edit then "✓" else "✗" end' 2>/dev/null)"
+        echo -e "  Delete:  $(echo "$result" | jq -r 'if .can_delete then "✓" else "✗" end' 2>/dev/null)"
+    else
+        echo "$result"
+    fi
+}
+
+cmd_summary() {
+    local result
+    result=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from sharing_policy import SharingPolicy
+
+sp = SharingPolicy(config_path='${SHARING_CONFIG}')
+print(json.dumps(sp.policy_summary(), indent=2, default=str))
+" 2>/dev/null)
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$result"
+        return
+    fi
+
+    echo -e "${BOLD}=== Sharing Policy Summary ===${NC}"
+    if [[ -z "$result" ]]; then
+        echo "  (no policy data)"
+        return
+    fi
+
+    if command -v jq &>/dev/null; then
+        local agents projects audit
+        agents=$(echo "$result" | jq -r '.total_agents' 2>/dev/null || echo "0")
+        projects=$(echo "$result" | jq -r '.total_projects' 2>/dev/null || echo "0")
+        audit=$(echo "$result" | jq -r '.audit_log_entries' 2>/dev/null || echo "0")
+        echo -e "  Total agents:   ${BOLD}${agents}${NC}"
+        echo -e "  Total projects: ${BOLD}${projects}${NC}"
+        echo -e "  Audit entries:  ${BOLD}${audit}${NC}"
+    else
+        echo "$result"
+    fi
+}
+
+# --- Main ---
+main() {
+    if [[ -z "$COMMAND" ]]; then
+        usage
+    fi
+
+    case "$COMMAND" in
+        list-agents)    cmd_list_agents ;;
+        list-projects)  cmd_list_projects ;;
+        grant)          cmd_grant ;;
+        revoke)         cmd_revoke ;;
+        check)          cmd_check ;;
+        summary)        cmd_summary ;;
+        *)
+            log_error "Unknown command: $COMMAND"
+            usage
+            ;;
+    esac
+}
+
+main

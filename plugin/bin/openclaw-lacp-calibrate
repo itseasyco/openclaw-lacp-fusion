@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# openclaw-lacp-calibrate — Confidence calibration for promotion thresholds
+#
+# Usage:
+#   openclaw-lacp-calibrate status
+#   openclaw-lacp-calibrate record --summary-id <id> --fact-id <id> --score <score> [--used|--unused]
+#   openclaw-lacp-calibrate suggest
+#   openclaw-lacp-calibrate apply
+#   openclaw-lacp-calibrate history
+#   openclaw-lacp-calibrate reset
+#
+# Part of OpenClaw LACP v2.0.0 — Phase D (Optimization)
+
+set -eo pipefail
+
+VERSION="2.0.0"
+SCRIPT_NAME="openclaw-lacp-calibrate"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+V2_LCM_DIR="${PLUGIN_DIR}/v2-lcm"
+CONFIG_PATH="${OPENCLAW_CALIBRATION_CONFIG:-$HOME/.openclaw/config/calibration.json}"
+
+log_info()  { echo -e "${BLUE}[info]${NC} $*"; }
+log_ok()    { echo -e "${GREEN}[ok]${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}[warn]${NC} $*"; }
+log_error() { echo -e "${RED}[error]${NC} $*" >&2; }
+
+usage() {
+    cat <<EOF
+${SCRIPT_NAME} v${VERSION} — Confidence Calibration
+
+COMMANDS:
+  status    Show current calibration state
+  record    Record a promotion with usage status
+  suggest   Compute optimal threshold
+  apply     Update threshold to optimal value
+  history   Show threshold update history
+  reset     Reset calibration to defaults
+
+OPTIONS:
+  --summary-id <id>   Summary identifier
+  --fact-id <id>      Fact identifier
+  --score <score>     Promotion score
+  --used              Mark fact as used
+  --unused            Mark fact as not used
+  --config <path>     Config file path
+  --help              Show this help
+
+EXAMPLES:
+  $SCRIPT_NAME status
+  $SCRIPT_NAME record --summary-id sum1 --fact-id f1 --score 80 --used
+  $SCRIPT_NAME suggest
+  $SCRIPT_NAME apply
+  $SCRIPT_NAME history
+EOF
+    exit 0
+}
+
+cmd_status() {
+    log_info "Current calibration state"
+
+    python3 -c "
+import sys
+sys.path.insert(0, '${V2_LCM_DIR}')
+from confidence_calibration import CalibrationTracker
+
+ct = CalibrationTracker(config_path='${CONFIG_PATH}')
+summary = ct.summary()
+metrics = summary['metrics_at_current']
+
+print(f'  Threshold: {summary[\"current_threshold\"]}')
+print(f'  Total records: {summary[\"total_records\"]}')
+print(f'  Labeled records: {summary[\"labeled_records\"]}')
+print(f'  Optimal threshold: {summary[\"optimal_threshold\"]}')
+print(f'  Precision: {metrics[\"precision\"]:.1%}')
+print(f'  Recall: {metrics[\"recall\"]:.1%}')
+print(f'  F1 Score: {metrics[\"f1\"]:.3f}')
+print(f'  History entries: {summary[\"history_count\"]}')
+"
+}
+
+cmd_record() {
+    local summary_id="" fact_id="" score="" used=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --summary-id) summary_id="$2"; shift 2 ;;
+            --fact-id)    fact_id="$2"; shift 2 ;;
+            --score)      score="$2"; shift 2 ;;
+            --used)       used="True"; shift ;;
+            --unused)     used="False"; shift ;;
+            *)            log_error "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    if [[ -z "$summary_id" || -z "$fact_id" || -z "$score" ]]; then
+        log_error "Missing required --summary-id, --fact-id, and --score"
+        exit 1
+    fi
+
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from confidence_calibration import CalibrationTracker
+
+ct = CalibrationTracker(config_path='${CONFIG_PATH}')
+ct.record_promotion('${summary_id}', '${fact_id}', ${score})
+if '${used}' == 'True':
+    ct.mark_used('${summary_id}', '${fact_id}')
+elif '${used}' == 'False':
+    ct.mark_unused('${summary_id}', '${fact_id}')
+ct.save()
+print(json.dumps({'recorded': True, 'summary_id': '${summary_id}', 'fact_id': '${fact_id}', 'score': ${score}}, indent=2))
+"
+
+    log_ok "Recorded promotion for ${summary_id}/${fact_id}"
+}
+
+cmd_suggest() {
+    log_info "Computing optimal threshold"
+
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from confidence_calibration import CalibrationTracker
+
+ct = CalibrationTracker(config_path='${CONFIG_PATH}')
+current = ct.get_current_threshold()
+optimal = ct.compute_optimal_threshold()
+metrics = ct.compute_metrics(optimal)
+
+print(json.dumps({
+    'current_threshold': current,
+    'suggested_threshold': optimal,
+    'direction': 'raise' if optimal > current else ('lower' if optimal < current else 'maintain'),
+    'f1_at_suggested': metrics['f1'],
+    'precision_at_suggested': metrics['precision'],
+    'recall_at_suggested': metrics['recall'],
+}, indent=2))
+"
+}
+
+cmd_apply() {
+    log_info "Applying threshold adjustment"
+
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from confidence_calibration import CalibrationTracker
+
+ct = CalibrationTracker(config_path='${CONFIG_PATH}')
+current = ct.get_current_threshold()
+optimal = ct.compute_optimal_threshold()
+
+if optimal != current:
+    ct.update_threshold(optimal, reason='auto-calibrated')
+    ct.save()
+    print(json.dumps({'applied': True, 'old_threshold': current, 'new_threshold': optimal}, indent=2))
+else:
+    print(json.dumps({'applied': False, 'threshold': current, 'reason': 'Already at optimal'}, indent=2))
+"
+}
+
+cmd_history() {
+    log_info "Calibration history"
+
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from confidence_calibration import CalibrationTracker
+
+ct = CalibrationTracker(config_path='${CONFIG_PATH}')
+summary = ct.summary()
+
+if summary['history_count'] == 0:
+    print('  No calibration history yet.')
+else:
+    records = ct._data.get('history', [])
+    for entry in records:
+        print(f'  [{entry.get(\"updated_at\", \"?\")}] {entry[\"old_threshold\"]} -> {entry[\"new_threshold\"]}')
+        if entry.get('reason'):
+            print(f'    Reason: {entry[\"reason\"]}')
+"
+}
+
+cmd_reset() {
+    log_warn "Resetting calibration to defaults"
+
+    python3 -c "
+import sys, json
+sys.path.insert(0, '${V2_LCM_DIR}')
+from confidence_calibration import CalibrationTracker
+
+ct = CalibrationTracker(config_path='${CONFIG_PATH}')
+ct._data = {'version': '2.0.0', 'records': [], 'current_threshold': 70, 'history': []}
+ct.save()
+print('  Calibration reset to defaults (threshold: 70)')
+"
+
+    log_ok "Calibration reset"
+}
+
+# --- Main ---
+
+main() {
+    if [[ $# -eq 0 ]]; then
+        usage
+    fi
+
+    local command="$1"
+    shift
+
+    case "$command" in
+        status)   cmd_status ;;
+        record)   cmd_record "$@" ;;
+        suggest)  cmd_suggest ;;
+        apply)    cmd_apply ;;
+        history)  cmd_history ;;
+        reset)    cmd_reset ;;
+        --help|-h) usage ;;
+        --version|-v) echo "${SCRIPT_NAME} v${VERSION}" ;;
+        *)
+            log_error "Unknown command: $command"
+            usage
+            ;;
+    esac
+}
+
+main "$@"

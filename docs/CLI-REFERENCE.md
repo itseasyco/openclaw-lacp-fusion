@@ -1,4 +1,4 @@
-# CLI Reference — OpenClaw LACP Fusion v1.0.0
+# CLI Reference — OpenClaw LACP Fusion v2.0.0
 
 Complete reference for all CLI commands in the OpenClaw LACP Fusion plugin.
 
@@ -385,6 +385,95 @@ Evidence verification engine.
 
 ```bash
 openclaw-verify --mode heuristic|test|llm [OPTIONS]
+```
+
+---
+
+## LCM-LACP Integration (v2.0.0)
+
+### `openclaw-lacp-promote`
+Promote LCM session facts to LACP persistent memory.
+
+```bash
+openclaw-lacp-promote auto --summary <id> [--score <n>] [--category <cat>]
+openclaw-lacp-promote pipeline --file <path> [--project <name>] [--threshold <n>] [--similarity-threshold <n>] [--calibrate-confidence] [--dry-run]
+openclaw-lacp-promote manual --summary <id> --fact <text> --reasoning <why>
+openclaw-lacp-promote list [--project <name>] [--since <date>]
+openclaw-lacp-promote verify --receipt-hash <hash>
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--similarity-threshold` | Dedup cosine similarity threshold | `0.85` |
+| `--calibrate-confidence` | Auto-calibrate threshold from usage data | off |
+| `--dry-run` | Score but don't promote | off |
+
+### `openclaw-lacp-context`
+Inject LACP facts into LCM session context.
+
+```bash
+openclaw-lacp-context inject --project <name> [--format json|markdown]
+openclaw-lacp-context query --topic <topic> [--project <name>]
+openclaw-lacp-context list [--project <name>]
+```
+
+### `openclaw-lacp-dedup`
+Semantic deduplication for promoted facts.
+
+```bash
+openclaw-lacp-dedup check --fact <text> [--vault <path>] [--threshold <n>]
+openclaw-lacp-dedup batch --file <path> [--vault <path>] [--threshold <n>]
+openclaw-lacp-dedup stats
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--threshold` | Cosine similarity threshold (0.0-1.0) | `0.85` |
+| `--vault` | Vault path | `$OPENCLAW_VAULT_ROOT` |
+
+### `openclaw-lacp-calibrate`
+Confidence calibration for promotion thresholds.
+
+```bash
+openclaw-lacp-calibrate [/path/to/vault] [--show-metrics] [--show-curve] [--update] [--threshold <n>] [--json]
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--update` | Auto-update threshold in config | off |
+| `--show-curve` | Display calibration history | off |
+| `--show-metrics` | Show precision/recall at thresholds | off |
+
+### `openclaw-lacp-share`
+Multi-agent memory sharing.
+
+```bash
+openclaw-lacp-share register --agent <id> --role <role>
+openclaw-lacp-share enable
+openclaw-lacp-share disable
+openclaw-lacp-share grant-access --agent <id> --project <name> [--role <role>]
+openclaw-lacp-share revoke-access --agent <id> --project <name>
+openclaw-lacp-share check --agent <id> --project <name> --action <action>
+openclaw-lacp-share list-available --from <agent>
+openclaw-lacp-share query --from <agent> --topic <topic>
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--policy-file` | Path to sharing policy config | `~/.openclaw/config/sharing-policy.json` |
+| `--role` | Agent role: reader, writer, curator | `reader` |
+| `--json` | Output as JSON | off |
+
+### `openclaw-lacp-policies`
+View and manage sharing policies (admin).
+
+```bash
+openclaw-lacp-policies list-agents [--project <name>]
+openclaw-lacp-policies list-projects [--agent <id>]
+openclaw-lacp-policies grant --agent <id> --role <role> --project <name>
+openclaw-lacp-policies revoke --agent <id> --project <name>
+openclaw-lacp-policies check --agent <id> --project <name>
+openclaw-lacp-policies summary [--json]
 ```
 
 ---

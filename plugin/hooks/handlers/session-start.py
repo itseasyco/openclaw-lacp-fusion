@@ -326,6 +326,43 @@ def _inject_lacp_context() -> str | None:
     return None
 
 
+def _store_injection_metadata(lacp_ctx: str) -> None:
+    """Store LACP injection metadata to context.json for tracking usage."""
+    session_id = os.getenv("OPENCLAW_SESSION_ID", os.getenv("CLAUDE_SESSION_ID", "default"))
+    memory_root = Path(os.getenv("OPENCLAW_MEMORY_ROOT", str(Path.home() / ".openclaw" / "memory")))
+    context_file = memory_root / "context.json"
+
+    try:
+        # Load existing context
+        context: dict = {}
+        if context_file.exists():
+            context = json.loads(context_file.read_text())
+
+        # Parse facts from the injected context string
+        facts = []
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        for line in lacp_ctx.split("\n"):
+            line = line.strip()
+            if line.startswith("•") or line.startswith("- "):
+                fact_text = line.lstrip("•- ").strip()
+                if fact_text:
+                    facts.append({
+                        "fact": fact_text,
+                        "source": "lacp-context-inject",
+                        "timestamp": now,
+                        "session_id": session_id,
+                        "used": None,
+                    })
+
+        if facts:
+            context["lacp_injected_facts"] = facts
+            memory_root.mkdir(parents=True, exist_ok=True)
+            context_file.write_text(json.dumps(context, indent=2, default=str))
+    except Exception:
+        pass  # Non-critical: don't block session start
+
+
 def main() -> None:
     payload = _read_payload()
     matcher = payload.get("matcher", "")
@@ -347,6 +384,7 @@ def main() -> None:
     lacp_ctx = _inject_lacp_context()
     if lacp_ctx:
         parts.append(f"\n{lacp_ctx}")
+        _store_injection_metadata(lacp_ctx)
 
     # Compact-specific reminder (for sessions resuming after compaction)
     if matcher == "compact":
