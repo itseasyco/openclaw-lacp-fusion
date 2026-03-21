@@ -18,7 +18,7 @@
     },
     {
       "id": "curl-pipe-interpreter",
-      "pattern": "\\b(?:curl|wget)\\b.*\\|\\s*(?:python3?|node|ruby|perl)\\b",
+      "pattern": "\\b(?:curl|wget)\\b.*\\|\\s*(?:python3?|node|ruby|perl|bash|sh|zsh)\\b",
       "flags": "IGNORECASE",
       "label": "curl|python pipes (network-to-interpreter)",
       "message": "Piping network content to an interpreter is unsafe. Download first, review, then run.",
@@ -94,7 +94,7 @@
       "message": "Potential data exfiltration from sensitive file.",
       "block_level": "block",
       "enabled": true,
-      "category": "destructive"
+      "category": "exfiltration"
     },
     {
       "id": "env-files",
@@ -112,7 +112,7 @@
       "flags": "IGNORECASE",
       "label": "config.toml access",
       "message": "Protected file: config.toml may contain sensitive configuration.",
-      "block_level": "block",
+      "block_level": "warn",
       "enabled": true,
       "category": "protected-path"
     },

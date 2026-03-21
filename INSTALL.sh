@@ -2,12 +2,38 @@
 set -euo pipefail
 
 # OpenClaw LACP Fusion Plugin Installer
-# Version: 2.0.0
+# Version: 2.2.0
 # Interactive CLI wizard for configuring and installing the plugin
 # Installs to ~/.openclaw/extensions/openclaw-lacp-fusion/
 
+# Require Bash 4.0+ (for associative arrays)
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "Error: Bash 4.0+ required (you have ${BASH_VERSION})."
+    echo "  macOS: Install via Homebrew: brew install bash"
+    echo "  Then run: /opt/homebrew/bin/bash INSTALL.sh"
+    exit 1
+fi
+
+# Cleanup trap — print recovery info on failure
+_install_cleanup() {
+    local exit_code=$?
+    if [ "$exit_code" -ne 0 ]; then
+        echo ""
+        echo -e "\033[0;31mInstallation failed (exit code $exit_code).\033[0m"
+        echo ""
+        echo "To recover:"
+        echo "  1. Re-run INSTALL.sh (it's safe to run again)"
+        echo "  2. If gateway config is broken: restore from backup:"
+        echo "     cp ~/.openclaw/openclaw.json.bak.* ~/.openclaw/openclaw.json"
+        echo "  3. To remove partial install:"
+        echo "     rm -rf ~/.openclaw/extensions/openclaw-lacp-fusion"
+        echo ""
+    fi
+}
+trap _install_cleanup EXIT
+
 PLUGIN_NAME="openclaw-lacp-fusion"
-PLUGIN_VERSION="2.0.0"
+PLUGIN_VERSION="2.2.0"
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 PLUGIN_PATH="$OPENCLAW_HOME/extensions/$PLUGIN_NAME"
 GATEWAY_CONFIG="$OPENCLAW_HOME/openclaw.json"
