@@ -1,0 +1,30 @@
+{
+  "name": "guard-rail",
+  "version": "1.0.0",
+  "description": "Safety-focused profile without context injection overhead. Blocks dangerous commands and catches incomplete work.",
+  "use_case": "When you want safety gates but don't need/want context injection at startup",
+  "hooks_enabled": [
+    "pretool-guard",
+    "stop-quality-gate"
+  ],
+  "hooks_disabled": [
+    "session-start",
+    "write-validate"
+  ],
+  "configuration": {
+    "pretool_guard": {
+      "block_level": "block",
+      "ttl_minutes": 720,
+      "approval_cache_enabled": true,
+      "strict_mode": false,
+      "dangerous_patterns": "all"
+    },
+    "stop_quality_gate": {
+      "enable_test_detection": true,
+      "enable_todo_detection": true,
+      "enable_rationalization_detection": true,
+      "sensitivity": "medium"
+    }
+  },
+  "notes": "Safety without the context injection overhead. Blocks dangerous commands and detects incomplete work, but doesn't inject any session context. Good for quick tasks where you want protection but not the full LACP memory stack."
+}

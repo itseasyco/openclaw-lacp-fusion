@@ -1,0 +1,41 @@
+{
+  "name": "autonomous",
+  "version": "1.0.0",
+  "description": "Autonomous agent profile: all hooks active, warnings instead of blocks. Agents continue working and escalate only when they need a human decision.",
+  "use_case": "Daily driver for autonomous agents, multi-agent workflows, unattended operation",
+  "hooks_enabled": [
+    "session-start",
+    "pretool-guard",
+    "stop-quality-gate",
+    "write-validate"
+  ],
+  "hooks_disabled": [],
+  "configuration": {
+    "session_start": {
+      "inject_git_context": true,
+      "inject_file_list": true,
+      "max_commits_to_show": 10
+    },
+    "pretool_guard": {
+      "block_level": "warn",
+      "ttl_minutes": 720,
+      "approval_cache_enabled": true,
+      "strict_mode": false,
+      "dangerous_patterns": "all",
+      "log_all_matches": true
+    },
+    "stop_quality_gate": {
+      "enable_test_detection": true,
+      "enable_todo_detection": true,
+      "enable_rationalization_detection": true,
+      "sensitivity": "low",
+      "allow_stop_with_warning": true
+    },
+    "write_validate": {
+      "block_level": "warn",
+      "validate_frontmatter": true,
+      "validate_taxonomy": false
+    }
+  },
+  "notes": "Designed for autonomous workflows. All safety hooks fire but none block execution — they log warnings to guard-blocks.jsonl instead. The agent keeps working and escalates to the user only when it genuinely needs a decision. Use openclaw-guard to review what was flagged."
+}

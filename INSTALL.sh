@@ -48,28 +48,68 @@ detect_environment() {
         *) DETECTED_OS="unknown" ;;
     esac
 
-    # Detect default Obsidian vault path
-    if [ -d "/Volumes/Cortex" ]; then
-        DETECTED_VAULT="/Volumes/Cortex"
-    elif [ -d "$HOME/obsidian/vault" ]; then
-        DETECTED_VAULT="$HOME/obsidian/vault"
-    elif [ -d "$HOME/Documents/Obsidian" ]; then
-        DETECTED_VAULT="$HOME/Documents/Obsidian"
-    else
-        DETECTED_VAULT="$HOME/obsidian/vault"
+    # Scan for Obsidian vaults (directories containing .obsidian/)
+    DETECTED_VAULTS=()
+    local search_roots=()
+
+    case "$DETECTED_OS" in
+        macos)
+            search_roots=("$HOME/Documents" "$HOME/Library/Mobile Documents" "$HOME/Desktop" "$HOME")
+            # Also check mounted volumes (external drives, NAS, etc.)
+            for vol in /Volumes/*/; do
+                [ -d "$vol" ] && search_roots+=("${vol%/}")
+            done
+            ;;
+        *)
+            search_roots=("$HOME/Documents" "$HOME/Desktop" "$HOME")
+            ;;
+    esac
+
+    for root in "${search_roots[@]}"; do
+        if [ -d "$root" ]; then
+            while IFS= read -r vault_dir; do
+                # vault_dir is the .obsidian folder; parent is the vault
+                local vault="${vault_dir%/.obsidian}"
+                DETECTED_VAULTS+=("$vault")
+            done < <(find "$root" -maxdepth 4 -name ".obsidian" -type d 2>/dev/null)
+        fi
+    done
+
+    # Deduplicate (in case overlapping search roots)
+    if [ "${#DETECTED_VAULTS[@]}" -gt 0 ]; then
+        local -A seen=()
+        local unique_vaults=()
+        for v in "${DETECTED_VAULTS[@]}"; do
+            if [ -z "${seen[$v]+x}" ]; then
+                seen[$v]=1
+                unique_vaults+=("$v")
+            fi
+        done
+        DETECTED_VAULTS=("${unique_vaults[@]}")
     fi
 }
 
 # ─── Interactive wizard ──────────────────────────────────────────────────────
 
+# Detect gum for interactive prompts (falls back to read-based prompts)
+HAS_GUM=false
+if command -v gum &>/dev/null; then
+    HAS_GUM=true
+fi
+
 prompt_value() {
     local prompt="$1"
     local default="$2"
-    local result
 
-    echo -en "  ${CYAN}?${NC} ${prompt} ${DIM}[${default}]${NC}: "
-    read -r result
-    echo "${result:-$default}"
+    if [ "$HAS_GUM" = "true" ]; then
+        echo -e "  ${CYAN}?${NC} ${prompt}"
+        gum input --placeholder "$default" --value "$default" --width 60
+    else
+        local result
+        echo -en "  ${CYAN}?${NC} ${prompt} ${DIM}[${default}]${NC}: "
+        read -r result
+        echo "${result:-$default}"
+    fi
 }
 
 prompt_choice() {
@@ -78,28 +118,26 @@ prompt_choice() {
     local options=("$@")
     local default="${options[0]}"
 
-    echo -e "  ${CYAN}?${NC} ${prompt}"
-    for i in "${!options[@]}"; do
-        if [ "$i" -eq 0 ]; then
-            echo -e "    ${GREEN}>${NC} ${BOLD}${options[$i]}${NC} ${DIM}(default)${NC}"
-        else
-            echo -e "      ${options[$i]}"
-        fi
-    done
-    echo -en "    Choice: "
-    read -r choice
-
-    if [ -z "$choice" ]; then
-        echo "$default"
+    if [ "$HAS_GUM" = "true" ]; then
+        echo -e "  ${CYAN}?${NC} ${prompt}"
+        gum choose --cursor="> " --cursor.foreground="212" "${options[@]}"
     else
-        # Match by number or exact text
-        for opt in "${options[@]}"; do
-            if [ "$choice" = "$opt" ]; then
-                echo "$opt"
-                return
+        echo -e "  ${CYAN}?${NC} ${prompt}"
+        for i in "${!options[@]}"; do
+            local num=$((i + 1))
+            if [ "$i" -eq 0 ]; then
+                echo -e "    ${GREEN}${num})${NC} ${BOLD}${options[$i]}${NC} ${DIM}(default)${NC}"
+            else
+                echo -e "    ${num}) ${options[$i]}"
             fi
         done
-        echo "$default"
+        echo -en "    Choice [1-${#options[@]}]: "
+        read -r choice
+        if [ -z "$choice" ] || [ "$choice" -lt 1 ] 2>/dev/null || [ "$choice" -gt "${#options[@]}" ] 2>/dev/null; then
+            echo "$default"
+        else
+            echo "${options[$((choice - 1))]}"
+        fi
     fi
 }
 
@@ -107,18 +145,37 @@ prompt_yes_no() {
     local prompt="$1"
     local default="${2:-y}"
 
-    if [ "$default" = "y" ]; then
-        echo -en "  ${CYAN}?${NC} ${prompt} ${DIM}[Y/n]${NC}: "
+    if [ "$HAS_GUM" = "true" ]; then
+        if [ "$default" = "y" ]; then
+            gum confirm "$prompt" --default=yes
+        else
+            gum confirm "$prompt" --default=no
+        fi
     else
-        echo -en "  ${CYAN}?${NC} ${prompt} ${DIM}[y/N]${NC}: "
+        if [ "$default" = "y" ]; then
+            echo -en "  ${CYAN}?${NC} ${prompt} ${DIM}[Y/n]${NC}: "
+        else
+            echo -en "  ${CYAN}?${NC} ${prompt} ${DIM}[y/N]${NC}: "
+        fi
+        read -r answer
+        answer="${answer:-$default}"
+        case "$answer" in
+            [yY]|[yY][eE][sS]) return 0 ;;
+            *) return 1 ;;
+        esac
     fi
-    read -r answer
-    answer="${answer:-$default}"
+}
 
-    case "$answer" in
-        [yY]|[yY][eE][sS]) return 0 ;;
-        *) return 1 ;;
-    esac
+prompt_browse_directory() {
+    if [ "$HAS_GUM" = "true" ]; then
+        echo -e "  ${DIM}Navigate with arrow keys, Enter to select${NC}"
+        gum file --directory --height 12 "${1:-$HOME}"
+    else
+        local result
+        echo -en "  ${CYAN}?${NC} Enter directory path: "
+        read -r result
+        echo "$result"
+    fi
 }
 
 run_wizard() {
@@ -131,25 +188,91 @@ run_wizard() {
     echo -e "${BOLD}Obsidian Vault${NC}"
     echo -e "  ${DIM}Your Obsidian vault stores knowledge graph data (Layer 2).${NC}"
     echo -e "  ${DIM}If you don't use Obsidian, a directory will be created for you.${NC}"
-    WIZARD_VAULT=$(prompt_value "Vault path" "$DETECTED_VAULT")
+    echo ""
+
+    if [ "${#DETECTED_VAULTS[@]}" -gt 0 ]; then
+        echo -e "  ${GREEN}Found ${#DETECTED_VAULTS[@]} Obsidian vault(s):${NC}"
+        echo ""
+
+        local vault_choices=()
+        for v in "${DETECTED_VAULTS[@]}"; do
+            vault_choices+=("$v")
+        done
+        vault_choices+=("Browse for a different folder")
+        vault_choices+=("Type a custom path")
+        vault_choices+=("Skip — I don't use Obsidian")
+
+        local vault_pick
+        vault_pick=$(prompt_choice "Select your vault" "${vault_choices[@]}")
+
+        case "$vault_pick" in
+            "Browse for a different folder")
+                WIZARD_VAULT=$(prompt_browse_directory "$HOME")
+                ;;
+            "Type a custom path")
+                WIZARD_VAULT=$(prompt_value "Vault path" "$HOME/my-vault")
+                ;;
+            "Skip — I don't use Obsidian")
+                WIZARD_VAULT="$OPENCLAW_HOME/data/knowledge"
+                log_info "No vault selected — using default knowledge directory"
+                ;;
+            *)
+                WIZARD_VAULT="$vault_pick"
+                ;;
+        esac
+    else
+        echo -e "  ${YELLOW}No Obsidian vaults detected.${NC}"
+        echo ""
+        local vault_pick
+        vault_pick=$(prompt_choice "How would you like to set your vault?" \
+            "Browse for folder" \
+            "Type a custom path" \
+            "Skip — I don't use Obsidian")
+
+        case "$vault_pick" in
+            "Browse for folder")
+                WIZARD_VAULT=$(prompt_browse_directory "$HOME")
+                ;;
+            "Type a custom path")
+                WIZARD_VAULT=$(prompt_value "Vault path" "$HOME/my-vault")
+                ;;
+            "Skip — I don't use Obsidian")
+                WIZARD_VAULT="$OPENCLAW_HOME/data/knowledge"
+                log_info "No vault selected — using default knowledge directory"
+                ;;
+        esac
+    fi
+    echo -e "  ${GREEN}✓${NC} Vault: $WIZARD_VAULT"
     echo ""
 
     # 2. Context engine
     echo -e "${BOLD}Context Engine${NC}"
     echo -e "  ${DIM}Controls how LACP stores and retrieves context facts.${NC}"
-    echo -e "  ${DIM}  auto          — auto-detect (uses lossless-claw if available, else file-based)${NC}"
-    echo -e "  ${DIM}  file-based    — JSON files on disk (no extra dependencies)${NC}"
-    echo -e "  ${DIM}  lossless-claw — native LCM database (~/.openclaw/lcm.db required)${NC}"
-    WIZARD_CONTEXT_ENGINE=$(prompt_choice "Context engine" "auto" "file-based" "lossless-claw")
+    echo ""
+    local ce_choice
+    ce_choice=$(prompt_choice "Context engine" \
+        "auto          — auto-detect (lossless-claw if available, else file-based)" \
+        "file-based    — JSON files on disk (no extra dependencies)" \
+        "lossless-claw — native LCM database (~/.openclaw/lcm.db required)")
+    WIZARD_CONTEXT_ENGINE="${ce_choice%%[[:space:]]*}"
+    echo -e "  ${GREEN}✓${NC} Context engine: $WIZARD_CONTEXT_ENGINE"
     echo ""
 
     # 3. Safety profile
     echo -e "${BOLD}Safety Profile${NC}"
-    echo -e "  ${DIM}Controls which execution hooks are active.${NC}"
-    echo -e "  ${DIM}  balanced      — session context + quality gate (recommended)${NC}"
-    echo -e "  ${DIM}  minimal-stop  — quality gate only (lightweight)${NC}"
-    echo -e "  ${DIM}  hardened-exec — all 4 hooks enabled (maximum safety)${NC}"
-    WIZARD_PROFILE=$(prompt_choice "Profile" "balanced" "minimal-stop" "hardened-exec")
+    echo -e "  ${DIM}Controls which execution hooks are active and how they behave.${NC}"
+    echo ""
+    local profile_choice
+    profile_choice=$(prompt_choice "Profile" \
+        "autonomous    — all hooks, warn-only (agents keep working, escalate when needed)" \
+        "balanced      — session context + quality gate (recommended for interactive use)" \
+        "context-only  — just git context injection, no safety gates" \
+        "guard-rail    — safety gates only, no context injection" \
+        "minimal-stop  — quality gate only (lightweight)" \
+        "hardened-exec — all 4 hooks, blocks dangerous ops" \
+        "full-audit    — all hooks, strict mode, verbose logging")
+    WIZARD_PROFILE="${profile_choice%%[[:space:]]*}"
+    echo -e "  ${GREEN}✓${NC} Safety profile: $WIZARD_PROFILE"
     echo ""
 
     # 4. Advanced config (optional)
@@ -159,15 +282,74 @@ run_wizard() {
         echo ""
         echo -e "${BOLD}Advanced Configuration${NC}"
 
-        WIZARD_POLICY_TIER=$(prompt_choice "Default policy tier" "review" "safe" "critical")
+        local tier_choice
+        tier_choice=$(prompt_choice "Default policy tier" \
+            "review   — require review before execution" \
+            "safe     — auto-approve safe operations" \
+            "critical — all operations require approval")
+        WIZARD_POLICY_TIER="${tier_choice%%[[:space:]]*}"
+
         WIZARD_CODE_GRAPH=$(prompt_yes_no "Enable code intelligence (AST analysis)?" "n" && echo "true" || echo "false")
         WIZARD_PROVENANCE=$(prompt_yes_no "Enable provenance tracking?" "y" && echo "true" || echo "false")
         WIZARD_LOCAL_FIRST=$(prompt_yes_no "Local-first mode (no external sync)?" "y" && echo "true" || echo "false")
+
+        # Guard configuration
+        echo ""
+        echo -e "${BOLD}Guard Configuration${NC}"
+        echo -e "  ${DIM}Controls how the pretool guard handles dangerous commands.${NC}"
+        echo ""
+
+        local guard_level_choice
+        guard_level_choice=$(prompt_choice "Default guard block level" \
+            "block — block dangerous commands (ask user first)" \
+            "warn  — warn but allow execution (log to guard-blocks.jsonl)" \
+            "log   — silently log matches (no interruption)")
+        WIZARD_GUARD_LEVEL="${guard_level_choice%%[[:space:]]*}"
+        echo -e "  ${GREEN}✓${NC} Guard block level: $WIZARD_GUARD_LEVEL"
+        echo ""
+
+        if prompt_yes_no "Review and toggle individual guard rules?" "n"; then
+            echo ""
+            echo -e "  ${DIM}16 rules are enabled by default. Disable any you don't need:${NC}"
+            echo ""
+
+            # Key rules users might want to toggle
+            local -a toggle_rules=(
+                "npm-publish:Package registry publishing (npm/yarn/pnpm/cargo publish)"
+                "git-reset-hard:git reset --hard (destructive)"
+                "git-clean-force:git clean -f (destructive)"
+                "chmod-777:chmod 777 (overly permissive)"
+                "docker-privileged:docker run --privileged"
+                "curl-pipe-interpreter:curl/wget piped to interpreter"
+                "env-files:.env file access"
+                "pem-key-files:PEM/key file access"
+            )
+
+            WIZARD_DISABLED_RULES=()
+            for rule_entry in "${toggle_rules[@]}"; do
+                local rule_id="${rule_entry%%:*}"
+                local rule_desc="${rule_entry#*:}"
+                if ! prompt_yes_no "Enable: ${rule_desc}?" "y"; then
+                    WIZARD_DISABLED_RULES+=("$rule_id")
+                    echo -e "    ${YELLOW}!${NC} ${rule_id} disabled"
+                fi
+            done
+
+            if [ "${#WIZARD_DISABLED_RULES[@]}" -eq 0 ]; then
+                echo -e "  ${GREEN}✓${NC} All rules enabled"
+            else
+                echo -e "  ${GREEN}✓${NC} ${#WIZARD_DISABLED_RULES[@]} rule(s) disabled"
+            fi
+        else
+            WIZARD_DISABLED_RULES=()
+        fi
     else
         WIZARD_POLICY_TIER="review"
         WIZARD_CODE_GRAPH="false"
         WIZARD_PROVENANCE="true"
         WIZARD_LOCAL_FIRST="true"
+        WIZARD_GUARD_LEVEL="block"
+        WIZARD_DISABLED_RULES=()
     fi
 
     # Resolve context engine "auto"
@@ -272,6 +454,24 @@ setup_plugin_directory() {
     cp "$SCRIPT_DIR/openclaw.plugin.json" "$PLUGIN_PATH/"
     cp "$SCRIPT_DIR/plugin.json" "$PLUGIN_PATH/"
 
+    # Generate package.json (required by gateway for plugin resolution)
+    cat > "$PLUGIN_PATH/package.json" << PKGJSON
+{
+  "name": "$PLUGIN_NAME",
+  "version": "$PLUGIN_VERSION",
+  "description": "LACP integration for OpenClaw — hooks, policy gates, gated execution, memory scaffolding, and evidence verification.",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.ts",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
+PKGJSON
+    log_success "package.json generated"
+
     # Copy plugin source tree
     if [ -d "$SCRIPT_DIR/plugin" ]; then
         # Hooks
@@ -282,7 +482,9 @@ setup_plugin_directory() {
             cp -r "$SCRIPT_DIR/plugin/hooks/rules" "$PLUGIN_PATH/hooks/"
             cp "$SCRIPT_DIR/plugin/hooks/plugin.json" "$PLUGIN_PATH/hooks/"
             [ -d "$SCRIPT_DIR/plugin/hooks/tests" ] && cp -r "$SCRIPT_DIR/plugin/hooks/tests" "$PLUGIN_PATH/hooks/"
-            log_success "Hooks installed (4 handlers, 3 profiles)"
+            local profile_count
+            profile_count=$(ls -1 "$PLUGIN_PATH/hooks/profiles"/*.json 2>/dev/null | wc -l | tr -d ' ')
+            log_success "Hooks installed (4 handlers, $profile_count profiles)"
         fi
 
         # Policy
@@ -324,7 +526,80 @@ setup_plugin_directory() {
         log_success "Documentation installed"
     fi
 
+    # Copy index.ts entry point (gateway requires this)
+    if [ -f "$SCRIPT_DIR/plugin/index.ts" ]; then
+        cp "$SCRIPT_DIR/plugin/index.ts" "$PLUGIN_PATH/index.ts"
+        log_success "Gateway entry point (index.ts) installed"
+    else
+        log_warning "index.ts not found in distribution — gateway may fail to load plugin"
+    fi
+
+    # Symlink OpenClaw SDK (index.ts imports from openclaw/plugin-sdk)
+    _link_openclaw_sdk
+
     log_success "Plugin files installed"
+}
+
+# ─── SDK Symlink Helper ──────────────────────────────────────────────────────
+
+_link_openclaw_sdk() {
+    # index.ts imports openclaw/plugin-sdk which must be resolvable via node_modules
+    local target_dir="$PLUGIN_PATH/node_modules"
+    mkdir -p "$target_dir"
+
+    # Already linked?
+    if [ -d "$target_dir/openclaw" ] || [ -L "$target_dir/openclaw" ]; then
+        log_success "OpenClaw SDK already linked"
+        return
+    fi
+
+    local sdk_path=""
+
+    # 1. Check other installed plugins
+    for ext_dir in "$OPENCLAW_HOME/extensions"/*/; do
+        local candidate="$ext_dir/node_modules/openclaw"
+        if [ -d "$candidate" ] && [ "$(basename "$ext_dir")" != "$PLUGIN_NAME" ]; then
+            sdk_path="$candidate"
+            break
+        fi
+    done
+
+    # 2. Check global openclaw install via which
+    if [ -z "$sdk_path" ]; then
+        local openclaw_bin
+        openclaw_bin=$(which openclaw 2>/dev/null || true)
+        if [ -n "$openclaw_bin" ]; then
+            # Resolve symlinks to find actual install
+            local real_bin
+            real_bin=$(readlink -f "$openclaw_bin" 2>/dev/null || realpath "$openclaw_bin" 2>/dev/null || echo "$openclaw_bin")
+            local global_dir
+            global_dir=$(dirname "$(dirname "$real_bin")")/lib/node_modules/openclaw
+            if [ -d "$global_dir" ]; then
+                sdk_path="$global_dir"
+            fi
+        fi
+    fi
+
+    # 3. Check common nvm/node paths
+    if [ -z "$sdk_path" ]; then
+        for candidate in \
+            "$HOME/.nvm/versions/node"/*/lib/node_modules/openclaw \
+            /usr/local/lib/node_modules/openclaw \
+            /usr/lib/node_modules/openclaw; do
+            if [ -d "$candidate" ]; then
+                sdk_path="$candidate"
+                break
+            fi
+        done
+    fi
+
+    if [ -n "$sdk_path" ]; then
+        ln -s "$sdk_path" "$target_dir/openclaw"
+        log_success "OpenClaw SDK linked from $sdk_path"
+    else
+        log_warning "Could not find OpenClaw SDK — index.ts may fail to load"
+        log_info "  Fix manually: ln -s \$(find ~/.openclaw/extensions -path '*/node_modules/openclaw' -maxdepth 3 | head -1) $target_dir/openclaw"
+    fi
 }
 
 # ─── Step 3: Create required directories ─────────────────────────────────────
@@ -404,6 +679,38 @@ OPENCLAW_HOOKS_PROFILE=$WIZARD_PROFILE
 ENVEOF
 
     log_success "Config generated at $env_file"
+
+    # Generate guard-rules.json with wizard settings
+    local guard_config="$PLUGIN_PATH/config/guard-rules.json"
+    if [ -f "$guard_config" ]; then
+        log_warning "Guard config already exists at $guard_config (preserving)"
+    elif [ -f "$SCRIPT_DIR/plugin/config/guard-rules.json" ]; then
+        cp "$SCRIPT_DIR/plugin/config/guard-rules.json" "$guard_config"
+
+        # Apply wizard guard level
+        if [ "$HAS_JQ" = "true" ] && [ -n "$WIZARD_GUARD_LEVEL" ]; then
+            local tmp
+            tmp=$(mktemp)
+            jq --arg level "$WIZARD_GUARD_LEVEL" '.defaults.block_level = $level' "$guard_config" > "$tmp" && mv "$tmp" "$guard_config"
+            log_success "Guard default block level set to: $WIZARD_GUARD_LEVEL"
+        fi
+
+        # Apply disabled rules from wizard
+        if [ "$HAS_JQ" = "true" ] && [ "${#WIZARD_DISABLED_RULES[@]}" -gt 0 ]; then
+            for rule_id in "${WIZARD_DISABLED_RULES[@]}"; do
+                local tmp
+                tmp=$(mktemp)
+                jq --arg rid "$rule_id" '
+                    .rules = [.rules[] | if .id == $rid then .enabled = false else . end]
+                ' "$guard_config" > "$tmp" && mv "$tmp" "$guard_config"
+            done
+            log_success "${#WIZARD_DISABLED_RULES[@]} guard rule(s) disabled per wizard selection"
+        fi
+
+        log_success "Guard config generated at $guard_config"
+    else
+        log_warning "Guard config template not found — will use factory defaults at runtime"
+    fi
 }
 
 # ─── Step 5: Update gateway config ──────────────────────────────────────────
@@ -478,7 +785,7 @@ update_gateway_config() {
     tmp=$(mktemp)
     jq --arg ver "$PLUGIN_VERSION" --arg path "$PLUGIN_PATH" --arg now "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '
       .plugins.installs["openclaw-lacp-fusion"] = {
-        "source": "local",
+        "source": "path",
         "spec": "openclaw-lacp-fusion",
         "installPath": $path,
         "version": $ver,
@@ -514,8 +821,60 @@ run_validation() {
     # Check plugin manifest
     if [ -f "$PLUGIN_PATH/openclaw.plugin.json" ]; then
         ((pass++))
+        log_success "openclaw.plugin.json present"
+        # Verify kind and name fields
+        if [ "$HAS_JQ" = "true" ]; then
+            if jq -e '.kind' "$PLUGIN_PATH/openclaw.plugin.json" &>/dev/null && \
+               jq -e '.name' "$PLUGIN_PATH/openclaw.plugin.json" &>/dev/null; then
+                ((pass++))
+                log_success "Manifest has required 'kind' and 'name' fields"
+            else
+                log_warning "Manifest missing 'kind' or 'name' field — gateway may reject"
+                ((fail++))
+            fi
+        fi
     else
         log_error "Missing openclaw.plugin.json"
+        ((fail++))
+    fi
+
+    # Check package.json with required fields
+    if [ -f "$PLUGIN_PATH/package.json" ]; then
+        ((pass++))
+        log_success "package.json present"
+        if [ "$HAS_JQ" = "true" ]; then
+            local pkg_ok=true
+            jq -e '.type == "module"' "$PLUGIN_PATH/package.json" &>/dev/null || pkg_ok=false
+            jq -e '.main == "index.ts"' "$PLUGIN_PATH/package.json" &>/dev/null || pkg_ok=false
+            jq -e '.openclaw.extensions' "$PLUGIN_PATH/package.json" &>/dev/null || pkg_ok=false
+            if [ "$pkg_ok" = "true" ]; then
+                ((pass++))
+                log_success "package.json has required fields (type, main, openclaw.extensions)"
+            else
+                log_warning "package.json missing required fields — gateway may not discover plugin"
+                ((fail++))
+            fi
+        fi
+    else
+        log_error "Missing package.json"
+        ((fail++))
+    fi
+
+    # Check index.ts entry point
+    if [ -f "$PLUGIN_PATH/index.ts" ]; then
+        ((pass++))
+        log_success "index.ts entry point present"
+    else
+        log_error "Missing index.ts — gateway cannot load plugin"
+        ((fail++))
+    fi
+
+    # Check OpenClaw SDK symlink
+    if [ -d "$PLUGIN_PATH/node_modules/openclaw" ] || [ -L "$PLUGIN_PATH/node_modules/openclaw" ]; then
+        ((pass++))
+        log_success "OpenClaw SDK linked in node_modules"
+    else
+        log_warning "OpenClaw SDK not found in node_modules — index.ts imports will fail"
         ((fail++))
     fi
 
@@ -540,6 +899,14 @@ run_validation() {
         ((fail++))
     fi
 
+    # Check guard config
+    if [ -f "$PLUGIN_PATH/config/guard-rules.json" ]; then
+        ((pass++))
+        log_success "Guard config present"
+    else
+        log_warning "Guard config missing — will use factory defaults"
+    fi
+
     # Check gateway registration
     if [ "$HAS_JQ" = "true" ]; then
         if jq -e '.plugins.entries["openclaw-lacp-fusion"].enabled' "$GATEWAY_CONFIG" &>/dev/null; then
@@ -547,6 +914,15 @@ run_validation() {
             log_success "Plugin registered in gateway config"
         else
             log_warning "Plugin not registered in gateway config"
+            ((fail++))
+        fi
+
+        # Verify gateway config is valid JSON
+        if jq '.' "$GATEWAY_CONFIG" &>/dev/null; then
+            ((pass++))
+            log_success "Gateway config is valid JSON"
+        else
+            log_error "Gateway config has JSON syntax errors"
             ((fail++))
         fi
     fi

@@ -1,0 +1,173 @@
+{
+  "version": "1.0.0",
+  "defaults": {
+    "block_level": "block",
+    "ttl_seconds": 43200,
+    "log_blocks": true
+  },
+  "rules": [
+    {
+      "id": "npm-publish",
+      "pattern": "\\b(?:npm|yarn|pnpm|cargo)\\s+publish\\b",
+      "flags": "IGNORECASE",
+      "label": "npm publish, yarn publish, etc.",
+      "message": "Publishing to registry requires explicit user approval.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "destructive"
+    },
+    {
+      "id": "curl-pipe-interpreter",
+      "pattern": "\\b(?:curl|wget)\\b.*\\|\\s*(?:python3?|node|ruby|perl)\\b",
+      "flags": "IGNORECASE",
+      "label": "curl|python pipes (network-to-interpreter)",
+      "message": "Piping network content to an interpreter is unsafe. Download first, review, then run.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "destructive"
+    },
+    {
+      "id": "chmod-777",
+      "pattern": "\\bchmod\\s+(?:-R\\s+)?777\\b",
+      "flags": "",
+      "label": "chmod 777 (overly permissive)",
+      "message": "chmod 777 is overly permissive. Use specific permissions (e.g. 755, 644).",
+      "block_level": "block",
+      "enabled": true,
+      "category": "destructive"
+    },
+    {
+      "id": "git-reset-hard",
+      "pattern": "\\bgit\\s+reset\\s+--hard\\b",
+      "flags": "IGNORECASE",
+      "label": "git reset --hard",
+      "message": "git reset --hard is destructive. Ask the user first.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "destructive"
+    },
+    {
+      "id": "git-clean-force",
+      "pattern": "\\bgit\\s+clean\\s+-f",
+      "flags": "IGNORECASE",
+      "label": "git clean -f",
+      "message": "git clean -f is destructive. Ask the user first.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "destructive"
+    },
+    {
+      "id": "docker-privileged",
+      "pattern": "\\bdocker\\s+run\\b[^\\n\\r]*--privileged\\b",
+      "flags": "IGNORECASE",
+      "label": "docker run --privileged",
+      "message": "docker run --privileged is a security risk. Use specific capabilities instead.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "destructive"
+    },
+    {
+      "id": "fork-bomb",
+      "pattern": ":\\(\\)\\s*\\{\\s*:\\s*\\|\\s*:\\s*&\\s*\\}\\s*;\\s*:",
+      "flags": "",
+      "label": "fork bomb",
+      "message": "Fork bomb detected.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "destructive"
+    },
+    {
+      "id": "scp-rsync-root",
+      "pattern": "\\b(?:scp|rsync)\\b.*[\\s:/]/root(?:/|$|\\s)",
+      "flags": "IGNORECASE",
+      "label": "scp/rsync to /root",
+      "message": "scp/rsync to /root is restricted. Use a non-root target path.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "destructive"
+    },
+    {
+      "id": "data-exfiltration",
+      "pattern": "\\b(?:curl|wget)\\b.*(?:-d|--data|--data-binary)\\s+@[^\\s]*(?:\\.env|\\.ssh|credentials|\\.key|\\.pem|secrets)",
+      "flags": "IGNORECASE",
+      "label": "data exfiltration from sensitive files",
+      "message": "Potential data exfiltration from sensitive file.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "destructive"
+    },
+    {
+      "id": "env-files",
+      "pattern": "\\.env($|\\.)",
+      "flags": "IGNORECASE",
+      "label": ".env file access",
+      "message": "Protected file: .env files contain sensitive configuration.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "protected-path"
+    },
+    {
+      "id": "config-toml",
+      "pattern": "config\\.toml($|\\.)",
+      "flags": "IGNORECASE",
+      "label": "config.toml access",
+      "message": "Protected file: config.toml may contain sensitive configuration.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "protected-path"
+    },
+    {
+      "id": "secrets-directory",
+      "pattern": "(?:^|/)secret(?:s)?(?:/|$|\\.)",
+      "flags": "IGNORECASE",
+      "label": "secrets directory access",
+      "message": "Protected path: secrets directory contains sensitive data.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "protected-path"
+    },
+    {
+      "id": "claude-settings",
+      "pattern": "\\.claude/settings\\.json$",
+      "flags": "IGNORECASE",
+      "label": ".claude/settings.json access",
+      "message": "Protected file: .claude/settings.json cannot be modified.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "protected-path"
+    },
+    {
+      "id": "authorized-keys",
+      "pattern": "authorized_keys$",
+      "flags": "IGNORECASE",
+      "label": "authorized_keys access",
+      "message": "Protected file: authorized_keys is security-critical.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "protected-path"
+    },
+    {
+      "id": "pem-key-files",
+      "pattern": "\\.(pem|key)$",
+      "flags": "IGNORECASE",
+      "label": "PEM/key file access",
+      "message": "Protected file: PEM and key files contain cryptographic material.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "protected-path"
+    },
+    {
+      "id": "gnupg-directory",
+      "pattern": "(?:^|/)\\.gnupg(?:/|$)",
+      "flags": "IGNORECASE",
+      "label": ".gnupg directory access",
+      "message": "Protected path: .gnupg directory contains GPG keys.",
+      "block_level": "block",
+      "enabled": true,
+      "category": "protected-path"
+    }
+  ],
+  "command_allowlist": [],
+  "path_allowlist": [],
+  "repo_overrides": {}
+}

@@ -1,5 +1,7 @@
 {
   "id": "openclaw-lacp-fusion",
+  "kind": "provider",
+  "name": "OpenClaw LACP Fusion",
   "version": "2.2.0",
   "description": "Local Agent Control Plane — hooks, policy gates, memory scaffolding, knowledge graph, code intelligence, and provenance tracking",
   "author": "Easy Labs",

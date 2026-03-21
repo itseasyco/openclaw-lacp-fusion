@@ -1,0 +1,747 @@
+#!/usr/bin/env python3
+"""
+openclaw-ingest-watch: File watcher + cron integration for auto-ingesting
+new files into the LACP knowledge graph.
+
+Usage:
+  openclaw-ingest-watch setup
+  openclaw-ingest-watch run [--once]
+  openclaw-ingest-watch status
+  openclaw-ingest-watch log [--tail N]
+  openclaw-ingest-watch add-dir <path> [--pattern GLOB]
+  openclaw-ingest-watch rm-dir <path>
+"""
+
+import sys
+import os
+import json
+import argparse
+import subprocess
+import shutil
+import time
+import re
+import fnmatch
+import plistlib
+from pathlib import Path
+from datetime import datetime, timezone
+
+
+VERSION = "1.0.0"
+
+PLUGIN_DIR = Path(
+    os.environ.get(
+        "OPENCLAW_PLUGIN_DIR",
+        Path.home() / ".openclaw" / "extensions" / "openclaw-lacp-fusion",
+    )
+)
+CONFIG_DIR = PLUGIN_DIR / "config"
+LOGS_DIR = PLUGIN_DIR / "logs"
+CONFIG_FILE = CONFIG_DIR / "ingest-watch.json"
+ENV_FILE = CONFIG_DIR / ".openclaw-lacp.env"
+LOG_FILE = LOGS_DIR / "ingest-watch.jsonl"
+
+# ANSI colors
+BLUE = "\033[0;34m"
+GREEN = "\033[0;32m"
+YELLOW = "\033[1;33m"
+RED = "\033[0;31m"
+MAGENTA = "\033[0;35m"
+NC = "\033[0m"
+
+
+def log_info(msg):
+    print(f"{BLUE}[info]{NC} {msg}", file=sys.stderr)
+
+
+def log_success(msg):
+    print(f"{GREEN}[ok]{NC} {msg}", file=sys.stderr)
+
+
+def log_warn(msg):
+    print(f"{YELLOW}[warn]{NC} {msg}", file=sys.stderr)
+
+
+def log_error(msg):
+    print(f"{RED}[error]{NC} {msg}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def resolve_path(p):
+    """Expand ~ and resolve to absolute path."""
+    return Path(os.path.expanduser(str(p))).resolve()
+
+
+def has_gum():
+    """Check if gum is available for interactive prompts."""
+    return shutil.which("gum") is not None
+
+
+def gum_input(prompt, default=""):
+    """Use gum for input if available, else fall back to input()."""
+    if has_gum():
+        cmd = ["gum", "input", "--prompt", f"{prompt} ", "--value", default]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return result.stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+    return input(f"{prompt} [{default}]: ").strip() or default
+
+
+def gum_confirm(prompt):
+    """Use gum for yes/no if available, else fall back to input()."""
+    if has_gum():
+        try:
+            subprocess.run(
+                ["gum", "confirm", prompt], check=True, capture_output=True
+            )
+            return True
+        except subprocess.CalledProcessError:
+            return False
+        except FileNotFoundError:
+            pass
+    answer = input(f"{prompt} (y/n): ").strip().lower()
+    return answer in ("y", "yes")
+
+
+def load_config():
+    """Load config from disk. Returns None if missing."""
+    if not CONFIG_FILE.exists():
+        return None
+    try:
+        return json.loads(CONFIG_FILE.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        log_error(f"Failed to read config: {exc}")
+        return None
+
+
+def save_config(cfg):
+    """Persist config to disk."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n")
+
+
+def append_log_entry(entry):
+    """Append a JSONL entry to the ingest-watch log."""
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LOG_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def read_log_entries():
+    """Read all log entries."""
+    if not LOG_FILE.exists():
+        return []
+    entries = []
+    for line in LOG_FILE.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+def get_processed_paths():
+    """Return set of already-processed file paths from the log."""
+    return {e.get("file_path") for e in read_log_entries() if e.get("file_path")}
+
+
+def default_vault_path():
+    """Determine default vault path from env or config."""
+    val = os.environ.get("LACP_OBSIDIAN_VAULT")
+    if val:
+        return val
+    # Try to read from env file
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("LACP_OBSIDIAN_VAULT="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return str(Path.home() / "obsidian" / "vault")
+
+
+# ---------------------------------------------------------------------------
+# Transcript detection
+# ---------------------------------------------------------------------------
+
+TRANSCRIPT_PATTERNS = [
+    re.compile(r"^Speaker\s*:", re.MULTILINE),
+    re.compile(r"^\[?\d{1,2}:\d{2}", re.MULTILINE),  # [00:12 or 0:12 timestamps
+    re.compile(r"^Q\s*:", re.MULTILINE),
+    re.compile(r"^A\s*:", re.MULTILINE),
+    re.compile(r"\[\d{2}:\d{2}:\d{2}\]", re.MULTILINE),  # [00:01:23]
+]
+
+
+def is_transcript(file_path):
+    """Heuristic: does the file look like a transcript?"""
+    try:
+        text = file_path.read_text(errors="ignore")[:4096]
+    except OSError:
+        return False
+    hits = sum(1 for pat in TRANSCRIPT_PATTERNS if pat.search(text))
+    return hits >= 2
+
+
+# ---------------------------------------------------------------------------
+# File classification
+# ---------------------------------------------------------------------------
+
+
+def classify_file(file_path):
+    """Return the ingest type for a given file: transcript, pdf, url, file."""
+    suffix = file_path.suffix.lower()
+
+    if suffix in (".url", ".webloc"):
+        return "url"
+
+    if suffix == ".pdf":
+        return "pdf"
+
+    if suffix in (".md", ".txt"):
+        if is_transcript(file_path):
+            return "transcript"
+        return "file"
+
+    # Fallback for anything else
+    return "file"
+
+
+def extract_url_from_file(file_path):
+    """Extract a URL from a .url or .webloc file."""
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".webloc":
+        try:
+            with open(file_path, "rb") as f:
+                plist = plistlib.load(f)
+            return plist.get("URL", "")
+        except Exception:
+            pass
+        # Try plain text fallback
+        try:
+            text = file_path.read_text(errors="ignore")
+            m = re.search(r"https?://[^\s<>\"]+", text)
+            if m:
+                return m.group(0)
+        except OSError:
+            pass
+        return ""
+
+    if suffix == ".url":
+        # Windows .url format: [InternetShortcut]\nURL=...
+        try:
+            text = file_path.read_text(errors="ignore")
+            for line in text.splitlines():
+                if line.strip().upper().startswith("URL="):
+                    return line.split("=", 1)[1].strip()
+            # Fallback: find any URL
+            m = re.search(r"https?://[^\s<>\"]+", text)
+            if m:
+                return m.group(0)
+        except OSError:
+            pass
+
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Ingest execution
+# ---------------------------------------------------------------------------
+
+
+def find_ingest_bin():
+    """Find the openclaw-brain-ingest binary."""
+    # Sibling in same bin/ dir
+    here = Path(__file__).resolve().parent
+    candidate = here / "openclaw-brain-ingest"
+    if candidate.exists():
+        return str(candidate)
+    # Fall back to PATH
+    found = shutil.which("openclaw-brain-ingest")
+    if found:
+        return found
+    return "openclaw-brain-ingest"
+
+
+def find_graph_bin():
+    """Find the openclaw-brain-graph binary."""
+    here = Path(__file__).resolve().parent
+    candidate = here / "openclaw-brain-graph"
+    if candidate.exists():
+        return str(candidate)
+    found = shutil.which("openclaw-brain-graph")
+    if found:
+        return found
+    return "openclaw-brain-graph"
+
+
+def run_ingest(file_type, vault_path, file_path):
+    """
+    Run openclaw-brain-ingest for a single file.
+    Returns (success: bool, command: str, error_message: str|None).
+    """
+    ingest_bin = find_ingest_bin()
+    vault = str(resolve_path(vault_path))
+    fpath = str(resolve_path(file_path))
+
+    if file_type == "url":
+        url = extract_url_from_file(Path(fpath))
+        if not url:
+            return False, f"{ingest_bin} url {vault} ???", "Could not extract URL from file"
+        cmd = [ingest_bin, "url", vault, url, "--title", Path(fpath).stem]
+    elif file_type == "transcript":
+        cmd = [ingest_bin, "transcript", vault, fpath]
+    elif file_type == "pdf":
+        cmd = [ingest_bin, "pdf", vault, fpath]
+    else:
+        cmd = [ingest_bin, "file", vault, fpath]
+
+    cmd_str = " ".join(cmd)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return True, cmd_str, None
+    except subprocess.CalledProcessError as exc:
+        error_msg = (exc.stderr or exc.stdout or str(exc)).strip()
+        return False, cmd_str, error_msg
+    except FileNotFoundError:
+        return False, cmd_str, f"Binary not found: {ingest_bin}"
+
+
+def run_graph_index(vault_path):
+    """Run openclaw-brain-graph index <vault> --update-qmd."""
+    graph_bin = find_graph_bin()
+    vault = str(resolve_path(vault_path))
+    cmd = [graph_bin, "index", vault, "--update-qmd"]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        log_warn(f"Graph index update failed: {exc}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: setup
+# ---------------------------------------------------------------------------
+
+
+def cmd_setup(_args):
+    """Interactive setup wizard."""
+    print(f"\n{MAGENTA}openclaw-ingest-watch setup{NC}")
+    print("=" * 50)
+
+    # 1. Watch directories
+    default_dirs = [
+        "~/inbox/",
+        "~/Downloads/*.md",
+        "~/.openclaw/data/knowledge/inbox/",
+    ]
+    print(f"\nDefault watch directories:")
+    for d in default_dirs:
+        print(f"  - {d}")
+
+    raw = gum_input(
+        "Watch directories (comma-separated, or Enter for defaults)",
+        ", ".join(default_dirs),
+    )
+    dir_specs = [s.strip() for s in raw.split(",") if s.strip()]
+
+    watch_dirs = []
+    for spec in dir_specs:
+        # Separate glob pattern from path
+        p = Path(os.path.expanduser(spec))
+        if "*" in p.name:
+            watch_dirs.append({"path": str(p.parent), "pattern": p.name, "enabled": True})
+        else:
+            watch_dirs.append({"path": str(spec), "pattern": "*", "enabled": True})
+
+    # 2. Vault path
+    vault = gum_input("Vault path", default_vault_path())
+
+    # 3. Interval
+    interval_raw = gum_input("Check interval (e.g. 30m, 60m)", "30m")
+    try:
+        interval_minutes = int(interval_raw.rstrip("m"))
+    except ValueError:
+        interval_minutes = 30
+
+    # 4. Cron
+    register_cron = gum_confirm("Register as OpenClaw cron job?")
+
+    # 5. Save config
+    cfg = {
+        "version": VERSION,
+        "vault_path": vault,
+        "check_interval_minutes": interval_minutes,
+        "update_graph_after_ingest": True,
+        "watch_dirs": watch_dirs,
+        "cron_registered": register_cron,
+        "processed_log": str(LOG_FILE),
+    }
+    save_config(cfg)
+    log_success(f"Config saved to {CONFIG_FILE}")
+
+    # 6. Cron command suggestion
+    if register_cron:
+        cron_cmd = (
+            f'openclaw cron add --every {interval_minutes}m --agent main '
+            f'--description "Auto-ingest new files into knowledge graph" '
+            f'--prompt "Run openclaw-ingest-watch run --once and report what was ingested"'
+        )
+        print(f"\n{YELLOW}To register the cron job, run:{NC}\n")
+        print(f"  {cron_cmd}\n")
+
+    print(f"{GREEN}Setup complete.{NC} Run `openclaw-ingest-watch run` to start.\n")
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: run
+# ---------------------------------------------------------------------------
+
+
+def collect_pending_files(cfg):
+    """Scan watch directories and return list of pending file Paths."""
+    processed = get_processed_paths()
+    pending = []
+
+    for wd in cfg.get("watch_dirs", []):
+        if not wd.get("enabled", True):
+            continue
+
+        dir_path = resolve_path(wd["path"])
+        pattern = wd.get("pattern", "*")
+
+        if not dir_path.is_dir():
+            continue
+
+        for entry in dir_path.iterdir():
+            if entry.is_file() and fnmatch.fnmatch(entry.name, pattern):
+                # Skip files inside processed/ subdirectory
+                if entry.parent.name == "processed":
+                    continue
+                abs_str = str(entry.resolve())
+                if abs_str not in processed:
+                    pending.append(entry.resolve())
+
+    return pending
+
+
+def move_to_processed(file_path):
+    """Move a file to a processed/ subdirectory within its watch folder."""
+    processed_dir = file_path.parent / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    dest = processed_dir / file_path.name
+    # Handle name collision
+    if dest.exists():
+        stem = file_path.stem
+        suffix = file_path.suffix
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        dest = processed_dir / f"{stem}-{ts}{suffix}"
+    try:
+        shutil.move(str(file_path), str(dest))
+    except OSError as exc:
+        log_warn(f"Could not move {file_path} to processed/: {exc}")
+
+
+def run_once(cfg):
+    """Single scan + ingest cycle. Returns count of files processed."""
+    vault = cfg["vault_path"]
+    pending = collect_pending_files(cfg)
+
+    if not pending:
+        log_info("No new files to ingest.")
+        return 0
+
+    log_info(f"Found {len(pending)} new file(s) to ingest.")
+    success_count = 0
+    error_count = 0
+
+    for fpath in pending:
+        file_type = classify_file(fpath)
+        log_info(f"Ingesting [{file_type}] {fpath.name}")
+
+        ok, cmd_str, err_msg = run_ingest(file_type, vault, fpath)
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "file_path": str(fpath),
+            "file_type": file_type,
+            "vault": str(resolve_path(vault)),
+            "status": "success" if ok else "error",
+            "ingest_command": cmd_str,
+        }
+        if err_msg:
+            entry["error_message"] = err_msg
+
+        append_log_entry(entry)
+
+        if ok:
+            log_success(f"Ingested: {fpath.name}")
+            move_to_processed(fpath)
+            success_count += 1
+        else:
+            log_error(f"Failed: {fpath.name} — {err_msg}")
+            error_count += 1
+
+    # Update knowledge graph
+    if success_count > 0 and cfg.get("update_graph_after_ingest", True):
+        log_info("Updating knowledge graph index...")
+        run_graph_index(vault)
+
+    log_info(f"Done: {success_count} ingested, {error_count} errors.")
+    return success_count
+
+
+def cmd_run(args):
+    """Main run loop."""
+    cfg = load_config()
+    if cfg is None:
+        log_error("No config found. Run `openclaw-ingest-watch setup` first.")
+        sys.exit(1)
+
+    if args.once:
+        run_once(cfg)
+        return
+
+    interval = cfg.get("check_interval_minutes", 30)
+    log_info(f"Starting watch loop (interval: {interval}m). Ctrl+C to stop.")
+
+    try:
+        while True:
+            run_once(cfg)
+            log_info(f"Sleeping {interval} minutes...")
+            time.sleep(interval * 60)
+    except KeyboardInterrupt:
+        print()
+        log_info("Stopped.")
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: status
+# ---------------------------------------------------------------------------
+
+
+def cmd_status(_args):
+    """Show current status."""
+    cfg = load_config()
+
+    print(f"\n{MAGENTA}openclaw-ingest-watch status{NC}")
+    print("=" * 50)
+
+    if cfg is None:
+        print(f"  Config: {RED}not configured{NC}")
+        print(f"  Run `openclaw-ingest-watch setup` first.\n")
+        return
+
+    # Config summary
+    print(f"  Vault:    {cfg.get('vault_path', 'unset')}")
+    print(f"  Interval: {cfg.get('check_interval_minutes', '?')}m")
+    print(f"  Graph update after ingest: {cfg.get('update_graph_after_ingest', True)}")
+    print()
+
+    # Watch dirs
+    print("  Watched directories:")
+    for wd in cfg.get("watch_dirs", []):
+        enabled = "on" if wd.get("enabled", True) else "off"
+        pattern = wd.get("pattern", "*")
+        print(f"    [{enabled}] {wd['path']}  (pattern: {pattern})")
+    print()
+
+    # Log stats
+    entries = read_log_entries()
+    total = len(entries)
+    successes = sum(1 for e in entries if e.get("status") == "success")
+    errors = total - successes
+    print(f"  Files processed: {total} ({successes} ok, {errors} errors)")
+
+    if entries:
+        last_ts = entries[-1].get("timestamp", "unknown")
+        print(f"  Last run:        {last_ts}")
+    else:
+        print(f"  Last run:        never")
+    print()
+
+    # Cron status
+    cron_registered = cfg.get("cron_registered", False)
+    if cron_registered:
+        # Try to check actual cron list
+        try:
+            result = subprocess.run(
+                ["openclaw", "cron", "list"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if "ingest-watch" in result.stdout.lower():
+                print(f"  Cron job: {GREEN}registered and visible{NC}")
+            else:
+                print(f"  Cron job: {YELLOW}config says registered, but not found in openclaw cron list{NC}")
+        except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+            print(f"  Cron job: {YELLOW}configured (could not verify){NC}")
+    else:
+        print(f"  Cron job: not registered")
+    print()
+
+    # Pending files
+    pending = collect_pending_files(cfg)
+    print(f"  Pending files:   {len(pending)}")
+    for p in pending[:10]:
+        print(f"    - {p}")
+    if len(pending) > 10:
+        print(f"    ... and {len(pending) - 10} more")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: log
+# ---------------------------------------------------------------------------
+
+
+def cmd_log(args):
+    """Show recent log entries."""
+    tail_n = args.tail
+    entries = read_log_entries()
+
+    if not entries:
+        print("No log entries yet.")
+        return
+
+    show = entries[-tail_n:]
+    for e in show:
+        ts = e.get("timestamp", "?")
+        fp = e.get("file_path", "?")
+        ft = e.get("file_type", "?")
+        status = e.get("status", "?")
+        if status == "success":
+            status_colored = f"{GREEN}success{NC}"
+        else:
+            status_colored = f"{RED}error{NC}"
+            err = e.get("error_message", "")
+            if err:
+                status_colored += f" — {err[:80]}"
+        print(f"  {ts}  [{ft:10s}]  {status_colored}  {fp}")
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: add-dir
+# ---------------------------------------------------------------------------
+
+
+def cmd_add_dir(args):
+    """Add a watch directory."""
+    cfg = load_config()
+    if cfg is None:
+        log_error("No config found. Run `openclaw-ingest-watch setup` first.")
+        sys.exit(1)
+
+    new_path = args.path
+    pattern = args.pattern or "*"
+
+    # Check for duplicate
+    for wd in cfg.get("watch_dirs", []):
+        if wd["path"] == new_path and wd.get("pattern", "*") == pattern:
+            log_warn(f"Directory already watched: {new_path} (pattern: {pattern})")
+            return
+
+    cfg.setdefault("watch_dirs", []).append(
+        {"path": new_path, "pattern": pattern, "enabled": True}
+    )
+    save_config(cfg)
+    log_success(f"Added watch directory: {new_path} (pattern: {pattern})")
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: rm-dir
+# ---------------------------------------------------------------------------
+
+
+def cmd_rm_dir(args):
+    """Remove a watch directory."""
+    cfg = load_config()
+    if cfg is None:
+        log_error("No config found. Run `openclaw-ingest-watch setup` first.")
+        sys.exit(1)
+
+    target = args.path
+    before = len(cfg.get("watch_dirs", []))
+    cfg["watch_dirs"] = [
+        wd for wd in cfg.get("watch_dirs", []) if wd["path"] != target
+    ]
+    after = len(cfg["watch_dirs"])
+
+    if after < before:
+        save_config(cfg)
+        log_success(f"Removed watch directory: {target}")
+    else:
+        log_warn(f"Directory not found in config: {target}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="openclaw-ingest-watch",
+        description="File watcher + cron integration for auto-ingesting files into the LACP knowledge graph.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # setup
+    subparsers.add_parser("setup", help="Interactive setup wizard")
+
+    # run
+    run_parser = subparsers.add_parser("run", help="Scan and ingest new files")
+    run_parser.add_argument(
+        "--once", action="store_true", help="Exit after a single scan"
+    )
+
+    # status
+    subparsers.add_parser("status", help="Show current configuration and stats")
+
+    # log
+    log_parser = subparsers.add_parser("log", help="Show recent log entries")
+    log_parser.add_argument(
+        "--tail", type=int, default=20, help="Number of entries to show (default: 20)"
+    )
+
+    # add-dir
+    add_parser = subparsers.add_parser("add-dir", help="Add a watch directory")
+    add_parser.add_argument("path", help="Directory path to watch")
+    add_parser.add_argument("--pattern", default=None, help="Glob pattern filter (e.g. *.md)")
+
+    # rm-dir
+    rm_parser = subparsers.add_parser("rm-dir", help="Remove a watch directory")
+    rm_parser.add_argument("path", help="Directory path to remove")
+
+    args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+
+    dispatch = {
+        "setup": cmd_setup,
+        "run": cmd_run,
+        "status": cmd_status,
+        "log": cmd_log,
+        "add-dir": cmd_add_dir,
+        "rm-dir": cmd_rm_dir,
+    }
+
+    handler = dispatch.get(args.command)
+    if handler:
+        handler(args)
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

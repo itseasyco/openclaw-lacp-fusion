@@ -1,0 +1,45 @@
+{
+  "name": "full-audit",
+  "version": "1.0.0",
+  "description": "Maximum observability: all hooks enabled with verbose logging, strict validation, and full provenance tracking.",
+  "use_case": "Compliance, audit trails, security-critical operations, debugging hook behavior",
+  "hooks_enabled": [
+    "session-start",
+    "pretool-guard",
+    "stop-quality-gate",
+    "write-validate"
+  ],
+  "hooks_disabled": [],
+  "configuration": {
+    "session_start": {
+      "inject_git_context": true,
+      "inject_file_list": true,
+      "max_commits_to_show": 20,
+      "verbose_logging": true
+    },
+    "pretool_guard": {
+      "block_level": "block",
+      "ttl_minutes": 360,
+      "approval_cache_enabled": true,
+      "strict_mode": true,
+      "dangerous_patterns": "all",
+      "log_all_matches": true,
+      "log_allowed_commands": true
+    },
+    "stop_quality_gate": {
+      "enable_test_detection": true,
+      "enable_todo_detection": true,
+      "enable_rationalization_detection": true,
+      "sensitivity": "high",
+      "verbose_logging": true
+    },
+    "write_validate": {
+      "block_level": "block",
+      "validate_frontmatter": true,
+      "validate_taxonomy": true,
+      "strict_schema": true,
+      "verbose_logging": true
+    }
+  },
+  "notes": "Everything on, everything logged. Every tool call is checked, every stop attempt is scrutinized, every file write is validated. Provenance tracking captures full decision chains. Use for compliance scenarios or when debugging hook behavior. Warning: higher overhead than other profiles."
+}

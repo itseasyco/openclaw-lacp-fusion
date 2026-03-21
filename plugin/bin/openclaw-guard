@@ -1,0 +1,898 @@
+#!/usr/bin/env python3
+"""
+openclaw-guard — CLI management tool for the OpenClaw PreTool Guard system.
+
+Manages guard rules, allowlists, block logs, and repo-specific overrides
+for the pretool-guard hook that blocks dangerous command patterns.
+
+Subcommands:
+  rules           List all guard rules
+  blocks          Show recent block log entries
+  toggle          Toggle a rule's enabled state
+  level           Set block_level for a rule
+  allow           Add a command to the allowlist
+  deny            Remove a command from all allowlists
+  config          Browse/edit configuration (interactive with gum)
+  defaults        Set global default block_level
+  reset           Reset guard-rules.json to factory defaults
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+VERSION = "1.0.0"
+
+PLUGIN_DIR = Path(
+    os.environ.get(
+        "OPENCLAW_PLUGIN_DIR",
+        str(Path.home() / ".openclaw" / "extensions" / "openclaw-lacp-fusion"),
+    )
+)
+
+CONFIG_PATH = PLUGIN_DIR / "config" / "guard-rules.json"
+BLOCK_LOG_PATH = PLUGIN_DIR / "logs" / "guard-blocks.jsonl"
+
+
+# ============================================================================
+# Factory Default Config
+# ============================================================================
+
+
+def _default_config() -> Dict[str, Any]:
+    """Return factory-default guard-rules.json content.
+
+    This is the canonical source of truth for the default rule set.
+    Both the CLI (openclaw-guard) and the pretool-guard hook should
+    reference this function (or its output) when bootstrapping.
+    """
+    return {
+        "version": "1.0.0",
+        "defaults": {
+            "block_level": "block",
+            "ttl_seconds": 43200,
+            "log_blocks": True,
+        },
+        "rules": [
+            {
+                "id": "npm-publish",
+                "pattern": "\\b(?:npm|yarn|pnpm|cargo)\\s+publish\\b",
+                "flags": "IGNORECASE",
+                "label": "npm publish, yarn publish, etc.",
+                "message": "Publishing to registry requires explicit user approval.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "destructive",
+            },
+            {
+                "id": "curl-pipe-interpreter",
+                "pattern": "\\b(?:curl|wget)\\b.*\\|\\s*(?:python3?|node|ruby|perl|bash|sh|zsh)\\b",
+                "flags": "IGNORECASE",
+                "label": "curl|interpreter pipes",
+                "message": "Piping network content to an interpreter is unsafe. Download first, review, then run.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "destructive",
+            },
+            {
+                "id": "chmod-777",
+                "pattern": "\\bchmod\\s+(?:-R\\s+)?777\\b",
+                "flags": "",
+                "label": "chmod 777 (overly permissive)",
+                "message": "chmod 777 is overly permissive. Use specific permissions (e.g. 755, 644).",
+                "block_level": "block",
+                "enabled": True,
+                "category": "destructive",
+            },
+            {
+                "id": "git-reset-hard",
+                "pattern": "\\bgit\\s+reset\\s+--hard\\b",
+                "flags": "IGNORECASE",
+                "label": "git reset --hard",
+                "message": "git reset --hard is destructive and may cause data loss.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "destructive",
+            },
+            {
+                "id": "git-clean-force",
+                "pattern": "\\bgit\\s+clean\\s+-f",
+                "flags": "IGNORECASE",
+                "label": "git clean -f",
+                "message": "git clean -f permanently removes untracked files.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "destructive",
+            },
+            {
+                "id": "docker-privileged",
+                "pattern": "\\bdocker\\s+run\\b[^\\n\\r]*--privileged\\b",
+                "flags": "IGNORECASE",
+                "label": "docker run --privileged",
+                "message": "docker run --privileged is a security risk. Use specific capabilities.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "destructive",
+            },
+            {
+                "id": "fork-bomb",
+                "pattern": ":\\(\\)\\s*\\{\\s*:\\s*\\|\\s*:\\s*&\\s*\\}\\s*;\\s*:",
+                "flags": "",
+                "label": "fork bomb",
+                "message": "Fork bomb detected.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "destructive",
+            },
+            {
+                "id": "scp-rsync-root",
+                "pattern": "\\b(?:scp|rsync)\\b.*[\\s:/]/root(?:/|$|\\s)",
+                "flags": "IGNORECASE",
+                "label": "scp/rsync to /root",
+                "message": "scp/rsync to /root is restricted. Use a non-root target path.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "destructive",
+            },
+            {
+                "id": "data-exfiltration",
+                "pattern": "\\b(?:curl|wget)\\b.*(?:-d|--data|--data-binary)\\s+@[^\\s]*(?:\\.env|\\.ssh|credentials|\\.key|\\.pem|secrets)",
+                "flags": "IGNORECASE",
+                "label": "data exfiltration from sensitive files",
+                "message": "Potential data exfiltration from sensitive file detected.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "exfiltration",
+            },
+            {
+                "id": "env-files",
+                "pattern": "\\.env($|\\.)",
+                "flags": "IGNORECASE",
+                "label": ".env file access",
+                "message": "Access to .env files is restricted to prevent secret leakage.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "protected-path",
+            },
+            {
+                "id": "config-toml",
+                "pattern": "config\\.toml($|\\.)",
+                "flags": "IGNORECASE",
+                "label": "config.toml access",
+                "message": "Access to config.toml is restricted.",
+                "block_level": "warn",
+                "enabled": True,
+                "category": "protected-path",
+            },
+            {
+                "id": "secrets-directory",
+                "pattern": "(?:^|/)secrets?(?:/|$|\\.)",
+                "flags": "IGNORECASE",
+                "label": "secrets directory access",
+                "message": "Access to secrets directory is restricted.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "protected-path",
+            },
+            {
+                "id": "claude-settings",
+                "pattern": "\\.claude/settings\\.json$",
+                "flags": "IGNORECASE",
+                "label": ".claude/settings.json access",
+                "message": "Modification of Claude settings file is restricted.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "protected-path",
+            },
+            {
+                "id": "authorized-keys",
+                "pattern": "authorized_keys$",
+                "flags": "IGNORECASE",
+                "label": "authorized_keys access",
+                "message": "Modification of authorized_keys is restricted.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "protected-path",
+            },
+            {
+                "id": "pem-key-files",
+                "pattern": "\\.(pem|key)$",
+                "flags": "IGNORECASE",
+                "label": "PEM/key file access",
+                "message": "Access to PEM/key files is restricted.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "protected-path",
+            },
+            {
+                "id": "gnupg-directory",
+                "pattern": "(?:^|/)\\.gnupg(?:/|$)",
+                "flags": "IGNORECASE",
+                "label": ".gnupg directory access",
+                "message": "Access to .gnupg directory is restricted.",
+                "block_level": "block",
+                "enabled": True,
+                "category": "protected-path",
+            },
+        ],
+        "command_allowlist": [],
+        "path_allowlist": [],
+        "repo_overrides": {},
+    }
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+def load_config() -> Dict[str, Any]:
+    """Load guard-rules.json, creating with factory defaults if missing."""
+    if not CONFIG_PATH.exists():
+        save_config(_default_config())
+    try:
+        return json.loads(CONFIG_PATH.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Error reading config: {exc}", file=sys.stderr)
+        print("Regenerating from factory defaults.", file=sys.stderr)
+        cfg = _default_config()
+        save_config(cfg)
+        return cfg
+
+
+def save_config(config: Dict[str, Any]) -> None:
+    """Write config back to guard-rules.json, pretty-printed."""
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
+
+
+def has_gum() -> bool:
+    """Check if the gum CLI tool is available."""
+    return shutil.which("gum") is not None
+
+
+def _run_gum(args: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    """Run a gum command, raising on failure."""
+    return subprocess.run(["gum"] + args, **kwargs)
+
+
+def gum_table(headers: List[str], rows: List[List[str]]) -> None:
+    """Print a table using gum (if available) or aligned plain text."""
+    if has_gum():
+        # gum table reads CSV-like input from stdin
+        lines = [",".join(headers)]
+        for row in rows:
+            # Escape commas in cell values
+            escaped = [c.replace(",", ";") for c in row]
+            lines.append(",".join(escaped))
+        table_input = "\n".join(lines)
+        try:
+            _run_gum(["table"], input=table_input, text=True)
+            return
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass  # fall through to plain text
+
+    # Plain text aligned table
+    all_rows = [headers] + rows
+    col_widths = []
+    for col_idx in range(len(headers)):
+        max_w = 0
+        for row in all_rows:
+            if col_idx < len(row):
+                max_w = max(max_w, len(row[col_idx]))
+        col_widths.append(max_w)
+
+    def _fmt_row(row: List[str]) -> str:
+        parts = []
+        for i, cell in enumerate(row):
+            w = col_widths[i] if i < len(col_widths) else len(cell)
+            parts.append(cell.ljust(w))
+        return "  ".join(parts)
+
+    print(_fmt_row(headers))
+    print("  ".join("-" * w for w in col_widths))
+    for row in rows:
+        print(_fmt_row(row))
+
+
+def format_timestamp(iso_str: str) -> str:
+    """Convert ISO8601 timestamp to human-readable relative time."""
+    try:
+        ts = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        delta = now - ts
+        seconds = int(delta.total_seconds())
+
+        if seconds < 0:
+            return iso_str  # future timestamp, just return raw
+        if seconds < 60:
+            return f"{seconds}s ago"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        days = hours // 24
+        if days < 30:
+            return f"{days}d ago"
+        return iso_str[:10]  # just the date
+    except (ValueError, TypeError):
+        return str(iso_str)
+
+
+def _find_rule(config: Dict[str, Any], rule_id: str) -> Optional[Dict[str, Any]]:
+    """Find a rule by ID, or None."""
+    for rule in config.get("rules", []):
+        if rule.get("id") == rule_id:
+            return rule
+    return None
+
+
+def _effective_block_level(rule: Dict[str, Any], defaults: Dict[str, Any]) -> str:
+    """Get effective block level for a rule (rule-level overrides default)."""
+    return rule.get("block_level") or defaults.get("block_level", "block")
+
+
+# ============================================================================
+# Subcommands
+# ============================================================================
+
+
+def cmd_rules(args: argparse.Namespace) -> int:
+    """List all guard rules."""
+    config = load_config()
+    defaults = config.get("defaults", {})
+    rules = config.get("rules", [])
+
+    if not rules:
+        print("No rules configured.")
+        return 0
+
+    headers = ["ID", "Label", "Category", "Block Level", "Enabled"]
+    rows = []
+    for rule in rules:
+        effective_level = _effective_block_level(rule, defaults)
+        rows.append([
+            rule.get("id", "?"),
+            rule.get("label", ""),
+            rule.get("category", ""),
+            effective_level,
+            "yes" if rule.get("enabled", True) else "no",
+        ])
+
+    gum_table(headers, rows)
+    return 0
+
+
+def cmd_blocks(args: argparse.Namespace) -> int:
+    """Show recent block log entries."""
+    if not BLOCK_LOG_PATH.exists():
+        print("No block log found.")
+        return 0
+
+    entries: List[Dict[str, Any]] = []
+    try:
+        with open(BLOCK_LOG_PATH, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    # Apply filters
+                    if args.repo and entry.get("repo") != args.repo:
+                        continue
+                    if args.rule_id and entry.get("rule_id") != args.rule_id:
+                        continue
+                    entries.append(entry)
+                except json.JSONDecodeError:
+                    continue
+    except OSError as exc:
+        print(f"Error reading block log: {exc}", file=sys.stderr)
+        return 1
+
+    tail = args.tail or 20
+    entries = entries[-tail:]
+
+    if not entries:
+        print("No matching block log entries.")
+        return 0
+
+    headers = ["Timestamp", "Rule ID", "Command", "Action", "Repo"]
+    rows = []
+    for entry in entries:
+        cmd = entry.get("command", "")
+        if len(cmd) > 60:
+            cmd = cmd[:57] + "..."
+        rows.append([
+            format_timestamp(entry.get("timestamp", "")),
+            entry.get("rule_id", ""),
+            cmd,
+            entry.get("action_taken", ""),
+            entry.get("repo", ""),
+        ])
+
+    gum_table(headers, rows)
+    return 0
+
+
+def cmd_toggle(args: argparse.Namespace) -> int:
+    """Toggle a rule's enabled state."""
+    config = load_config()
+    rule = _find_rule(config, args.rule_id)
+    if rule is None:
+        print(f"Rule '{args.rule_id}' not found.", file=sys.stderr)
+        return 1
+
+    current = rule.get("enabled", True)
+    rule["enabled"] = not current
+    save_config(config)
+
+    state = "disabled" if current else "enabled"
+    print(f"Rule '{args.rule_id}' is now {state}")
+    return 0
+
+
+def cmd_level(args: argparse.Namespace) -> int:
+    """Set block_level for a specific rule."""
+    config = load_config()
+    rule = _find_rule(config, args.rule_id)
+    if rule is None:
+        print(f"Rule '{args.rule_id}' not found.", file=sys.stderr)
+        return 1
+
+    rule["block_level"] = args.block_level
+    save_config(config)
+    print(f"Rule '{args.rule_id}' block_level set to '{args.block_level}'")
+    return 0
+
+
+def cmd_allow(args: argparse.Namespace) -> int:
+    """Add a command to the allowlist."""
+    config = load_config()
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    entry = {
+        "pattern": args.command_pattern,
+        "reason": args.reason or "",
+        "added_at": now_iso,
+        "scope": args.repo if args.repo else "global",
+    }
+
+    if args.repo:
+        overrides = config.setdefault("repo_overrides", {})
+        repo_cfg = overrides.setdefault(args.repo, {
+            "block_level": config.get("defaults", {}).get("block_level", "block"),
+            "rules_override": {},
+            "command_allowlist": [],
+            "path_allowlist": [],
+        })
+        repo_cfg.setdefault("command_allowlist", []).append(entry)
+        scope_label = args.repo
+    else:
+        config.setdefault("command_allowlist", []).append(entry)
+        scope_label = "global"
+
+    save_config(config)
+    print(f"Added '{args.command_pattern}' to {scope_label} allowlist")
+    return 0
+
+
+def cmd_deny(args: argparse.Namespace) -> int:
+    """Remove a command pattern from all allowlists."""
+    config = load_config()
+    pattern = args.command_pattern
+    removed = 0
+
+    # Remove from global allowlist
+    global_list = config.get("command_allowlist", [])
+    original_len = len(global_list)
+    config["command_allowlist"] = [
+        e for e in global_list if e.get("pattern") != pattern
+    ]
+    removed += original_len - len(config["command_allowlist"])
+
+    # Remove from all repo overrides
+    for repo_path, repo_cfg in config.get("repo_overrides", {}).items():
+        repo_list = repo_cfg.get("command_allowlist", [])
+        original_len = len(repo_list)
+        repo_cfg["command_allowlist"] = [
+            e for e in repo_list if e.get("pattern") != pattern
+        ]
+        removed += original_len - len(repo_cfg["command_allowlist"])
+
+    save_config(config)
+    if removed:
+        print(f"Removed '{pattern}' from {removed} allowlist(s)")
+    else:
+        print(f"Pattern '{pattern}' was not found in any allowlist")
+    return 0
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    """Browse/edit configuration interactively (gum) or dump JSON."""
+    config = load_config()
+
+    if not has_gum():
+        # No gum: just dump the config (or repo override) as formatted JSON
+        if args.repo:
+            repo_cfg = config.get("repo_overrides", {}).get(args.repo)
+            if repo_cfg is None:
+                print(f"No overrides configured for repo: {args.repo}")
+                return 0
+            print(json.dumps(repo_cfg, indent=2))
+        else:
+            print(json.dumps(config, indent=2))
+        return 0
+
+    # Interactive gum mode
+    while True:
+        menu_items = [
+            "View/edit defaults",
+            "Browse rules",
+            "Manage allowlists",
+        ]
+        if args.repo:
+            menu_items.append(f"Repo overrides ({args.repo})")
+        menu_items.append("Exit")
+
+        try:
+            result = _run_gum(
+                ["choose", "--header", "Guard Configuration"] + menu_items,
+                capture_output=True, text=True,
+            )
+        except (subprocess.SubprocessError, FileNotFoundError):
+            # Fallback to plain JSON
+            print(json.dumps(config, indent=2))
+            return 0
+
+        if result.returncode != 0:
+            return 0
+
+        choice = result.stdout.strip()
+
+        if choice == "Exit" or not choice:
+            return 0
+
+        if choice == "View/edit defaults":
+            _interactive_defaults(config)
+
+        elif choice == "Browse rules":
+            _interactive_rules(config)
+
+        elif choice == "Manage allowlists":
+            _interactive_allowlists(config)
+
+        elif choice.startswith("Repo overrides"):
+            _interactive_repo_overrides(config, args.repo)
+
+    return 0
+
+
+def _interactive_defaults(config: Dict[str, Any]) -> None:
+    """Interactive defaults editing via gum."""
+    defaults = config.get("defaults", {})
+    current_level = defaults.get("block_level", "block")
+    print(f"\nCurrent default block_level: {current_level}")
+    print(f"Current TTL: {defaults.get('ttl_seconds', 43200)}s")
+    print(f"Log blocks: {defaults.get('log_blocks', True)}\n")
+
+    try:
+        result = _run_gum(
+            ["choose", "--header", "Set default block_level", "block", "warn", "log"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            defaults["block_level"] = result.stdout.strip()
+            config["defaults"] = defaults
+            save_config(config)
+            print(f"Default block_level set to '{defaults['block_level']}'")
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+
+def _interactive_rules(config: Dict[str, Any]) -> None:
+    """Interactive rule browsing via gum."""
+    rules = config.get("rules", [])
+    defaults = config.get("defaults", {})
+    rule_labels = [
+        f"{r['id']} ({_effective_block_level(r, defaults)}, {'on' if r.get('enabled', True) else 'off'})"
+        for r in rules
+    ]
+    rule_labels.append("Back")
+
+    try:
+        result = _run_gum(
+            ["choose", "--header", "Select a rule to edit"] + rule_labels,
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return
+        selected = result.stdout.strip()
+        if selected == "Back" or not selected:
+            return
+
+        rule_id = selected.split(" ")[0]
+        rule = _find_rule(config, rule_id)
+        if not rule:
+            return
+
+        action_result = _run_gum(
+            ["choose", "--header", f"Rule: {rule_id}", "Toggle enabled", "Change block_level", "Back"],
+            capture_output=True, text=True,
+        )
+        if action_result.returncode != 0:
+            return
+        action = action_result.stdout.strip()
+
+        if action == "Toggle enabled":
+            rule["enabled"] = not rule.get("enabled", True)
+            save_config(config)
+            state = "enabled" if rule["enabled"] else "disabled"
+            print(f"Rule '{rule_id}' is now {state}")
+
+        elif action == "Change block_level":
+            level_result = _run_gum(
+                ["choose", "--header", "Block level", "block", "warn", "log"],
+                capture_output=True, text=True,
+            )
+            if level_result.returncode == 0 and level_result.stdout.strip():
+                rule["block_level"] = level_result.stdout.strip()
+                save_config(config)
+                print(f"Rule '{rule_id}' block_level set to '{rule['block_level']}'")
+
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+
+def _interactive_allowlists(config: Dict[str, Any]) -> None:
+    """Interactive allowlist management via gum."""
+    global_list = config.get("command_allowlist", [])
+    print(f"\nGlobal command allowlist ({len(global_list)} entries):")
+    for entry in global_list:
+        print(f"  - {entry.get('pattern', '?')}  ({entry.get('reason', 'no reason')})")
+
+    try:
+        result = _run_gum(
+            ["choose", "--header", "Allowlist actions", "Add entry", "Remove entry", "Back"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return
+        action = result.stdout.strip()
+
+        if action == "Add entry":
+            pat = _run_gum(
+                ["input", "--placeholder", "Command pattern to allow"],
+                capture_output=True, text=True,
+            )
+            if pat.returncode == 0 and pat.stdout.strip():
+                reason = _run_gum(
+                    ["input", "--placeholder", "Reason (optional)"],
+                    capture_output=True, text=True,
+                )
+                now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                config.setdefault("command_allowlist", []).append({
+                    "pattern": pat.stdout.strip(),
+                    "reason": reason.stdout.strip() if reason.returncode == 0 else "",
+                    "added_at": now_iso,
+                    "scope": "global",
+                })
+                save_config(config)
+                print(f"Added '{pat.stdout.strip()}' to global allowlist")
+
+        elif action == "Remove entry":
+            if not global_list:
+                print("Allowlist is empty.")
+                return
+            patterns = [e.get("pattern", "?") for e in global_list]
+            patterns.append("Cancel")
+            sel = _run_gum(
+                ["choose", "--header", "Remove which entry?"] + patterns,
+                capture_output=True, text=True,
+            )
+            if sel.returncode == 0 and sel.stdout.strip() != "Cancel":
+                pattern = sel.stdout.strip()
+                config["command_allowlist"] = [
+                    e for e in global_list if e.get("pattern") != pattern
+                ]
+                save_config(config)
+                print(f"Removed '{pattern}' from global allowlist")
+
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+
+def _interactive_repo_overrides(config: Dict[str, Any], repo: str) -> None:
+    """Interactive repo override editing via gum."""
+    overrides = config.setdefault("repo_overrides", {})
+    repo_cfg = overrides.get(repo)
+
+    if repo_cfg is None:
+        try:
+            result = _run_gum(
+                ["confirm", f"No overrides for {repo}. Create one?"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                return
+        except (subprocess.SubprocessError, FileNotFoundError):
+            return
+
+        repo_cfg = {
+            "block_level": config.get("defaults", {}).get("block_level", "block"),
+            "rules_override": {},
+            "command_allowlist": [],
+            "path_allowlist": [],
+        }
+        overrides[repo] = repo_cfg
+        save_config(config)
+        print(f"Created override for {repo}")
+
+    print(f"\nRepo override for {repo}:")
+    print(json.dumps(repo_cfg, indent=2))
+
+    try:
+        result = _run_gum(
+            ["choose", "--header", f"Override: {repo}", "Change block_level", "Back"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return
+        action = result.stdout.strip()
+
+        if action == "Change block_level":
+            level_result = _run_gum(
+                ["choose", "--header", "Block level", "block", "warn", "log"],
+                capture_output=True, text=True,
+            )
+            if level_result.returncode == 0 and level_result.stdout.strip():
+                repo_cfg["block_level"] = level_result.stdout.strip()
+                save_config(config)
+                print(f"Repo {repo} block_level set to '{repo_cfg['block_level']}'")
+
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+
+def cmd_defaults(args: argparse.Namespace) -> int:
+    """Set global default block_level."""
+    config = load_config()
+    defaults = config.setdefault("defaults", {})
+    defaults["block_level"] = args.level
+    save_config(config)
+    print(f"Global default block_level set to '{args.level}'")
+    return 0
+
+
+def cmd_reset(args: argparse.Namespace) -> int:
+    """Reset guard-rules.json to factory defaults."""
+    confirmed = args.confirm
+
+    if not confirmed:
+        if has_gum():
+            try:
+                result = _run_gum(
+                    ["confirm", "Reset guard-rules.json to factory defaults?"],
+                    capture_output=True, text=True,
+                )
+                confirmed = result.returncode == 0
+            except (subprocess.SubprocessError, FileNotFoundError):
+                confirmed = False
+        else:
+            answer = input("Reset guard-rules.json to factory defaults? [y/N] ").strip().lower()
+            confirmed = answer in ("y", "yes")
+
+    if not confirmed:
+        print("Reset cancelled.")
+        return 0
+
+    save_config(_default_config())
+    print("Guard rules reset to factory defaults.")
+    return 0
+
+
+# ============================================================================
+# Argument Parser
+# ============================================================================
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="openclaw-guard",
+        description="Manage OpenClaw PreTool Guard rules, allowlists, and block logs.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    sub = parser.add_subparsers(dest="command", help="Available subcommands")
+
+    # rules
+    sub.add_parser("rules", help="List all guard rules")
+
+    # blocks
+    blocks_p = sub.add_parser("blocks", help="Show recent block log entries")
+    blocks_p.add_argument("--tail", type=int, default=20, help="Number of entries (default: 20)")
+    blocks_p.add_argument("--repo", type=str, default=None, help="Filter by repo path")
+    blocks_p.add_argument("--rule-id", type=str, default=None, help="Filter by rule ID")
+
+    # toggle
+    toggle_p = sub.add_parser("toggle", help="Toggle a rule's enabled state")
+    toggle_p.add_argument("rule_id", help="Rule ID to toggle")
+
+    # level
+    level_p = sub.add_parser("level", help="Set block_level for a rule")
+    level_p.add_argument("rule_id", help="Rule ID")
+    level_p.add_argument("block_level", choices=["block", "warn", "log"], help="New block level")
+
+    # allow
+    allow_p = sub.add_parser("allow", help="Add command to allowlist")
+    allow_p.add_argument("command_pattern", help="Command pattern to allow")
+    allow_p.add_argument("--repo", type=str, default=None, help="Scope to repo path")
+    allow_p.add_argument("--reason", type=str, default=None, help="Reason for allowing")
+
+    # deny
+    deny_p = sub.add_parser("deny", help="Remove command from all allowlists")
+    deny_p.add_argument("command_pattern", help="Command pattern to remove")
+
+    # config
+    config_p = sub.add_parser("config", help="Browse/edit configuration")
+    config_p.add_argument("--repo", type=str, default=None, help="Show/create repo overrides")
+
+    # defaults
+    defaults_p = sub.add_parser("defaults", help="Set global default block_level")
+    defaults_p.add_argument("--level", required=True, choices=["block", "warn", "log"],
+                            help="Default block level")
+
+    # reset
+    reset_p = sub.add_parser("reset", help="Reset to factory defaults")
+    reset_p.add_argument("--confirm", action="store_true", help="Skip confirmation prompt")
+
+    return parser
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 0
+
+    dispatch = {
+        "rules": cmd_rules,
+        "blocks": cmd_blocks,
+        "toggle": cmd_toggle,
+        "level": cmd_level,
+        "allow": cmd_allow,
+        "deny": cmd_deny,
+        "config": cmd_config,
+        "defaults": cmd_defaults,
+        "reset": cmd_reset,
+    }
+
+    handler = dispatch.get(args.command)
+    if handler is None:
+        parser.print_help()
+        return 1
+
+    return handler(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,22 @@
+{
+  "name": "context-only",
+  "version": "1.0.0",
+  "description": "Minimal context injection only — no safety gates, no validation, no guards.",
+  "use_case": "Lightweight sessions where you just want git context injected at startup, nothing else",
+  "hooks_enabled": [
+    "session-start"
+  ],
+  "hooks_disabled": [
+    "pretool-guard",
+    "stop-quality-gate",
+    "write-validate"
+  ],
+  "configuration": {
+    "session_start": {
+      "inject_git_context": true,
+      "inject_file_list": true,
+      "max_commits_to_show": 5
+    }
+  },
+  "notes": "Lightest possible touch. Only injects git context (branch, commits, modified files) at session start. No safety hooks, no quality gates, no write validation. Use when overhead must be minimal."
+}
