@@ -530,6 +530,17 @@ PKGJSON
             log_success "Bin scripts installed ($bin_count executables)"
         fi
 
+        # Python library modules (mycelium, consolidation, etc.)
+        if [ -d "$SCRIPT_DIR/plugin/lib" ]; then
+            mkdir -p "$PLUGIN_PATH/lib"
+            cp "$SCRIPT_DIR/plugin/lib"/*.py "$PLUGIN_PATH/lib/" 2>/dev/null || true
+            cp "$SCRIPT_DIR/plugin/__init__.py" "$PLUGIN_PATH/__init__.py" 2>/dev/null || true
+            cp "$SCRIPT_DIR/plugin/lib/__init__.py" "$PLUGIN_PATH/lib/__init__.py" 2>/dev/null || true
+            local lib_count
+            lib_count=$(ls -1 "$PLUGIN_PATH/lib"/*.py 2>/dev/null | wc -l | tr -d ' ')
+            log_success "Python library modules installed ($lib_count modules)"
+        fi
+
         # Config
         if [ -d "$SCRIPT_DIR/plugin/config" ]; then
             mkdir -p "$PLUGIN_PATH/config"
